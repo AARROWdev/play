@@ -807,6 +807,7 @@ def apply_skin(app, name):
 
 MUTEX_NAMES = ('PLAYAppMutex', 'Global\\PLAYAppMutex')
 ERROR_ALREADY_EXISTS = 183
+ERROR_ACCESS_DENIED = 5
 
 
 def already_running(names=MUTEX_NAMES):
@@ -817,7 +818,9 @@ def already_running(names=MUTEX_NAMES):
     taken, existed = [], False
     for n in names:
         h = k32.CreateMutexW(None, False, n)
-        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        err = ctypes.get_last_error()
+        # ACCESS_DENIED on the Global name = another Windows user is running PLAY (and holds the port)
+        if err == ERROR_ALREADY_EXISTS or (err == ERROR_ACCESS_DENIED and n.startswith('Global')):
             existed = True
         if h:
             taken.append(h)

@@ -1,5 +1,7 @@
 # Runs inside a fresh Windows Sandbox: install PLAY, check what the installer set up, run it against a small
 # generated library over HTTP and UDP, then uninstall and check everything is gone. Results -> C:\out\results.txt.
+# This installs, kills PLAY and shuts the machine down: only ever inside Windows Sandbox.
+if ($env:USERNAME -ne 'WDAGUtilityAccount') { throw 'inside.ps1 runs only inside Windows Sandbox (use run-sandbox.ps1)' }
 $ErrorActionPreference = 'Continue'
 $log = 'C:\out\results.txt'
 $fails = 0
