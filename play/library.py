@@ -93,6 +93,7 @@ class Library:
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._items = []
         self._scanned = 0
+        self._last_digest = None
         self.version = 0          # bumps on every scan or change; the UI and the server compare it
 
     # ------------------------------------------------------------------ settings
@@ -168,12 +169,23 @@ class Library:
                 _write_json(self.cache_path, self.fpcache)
             if tagged:
                 self.save()
-            self._items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
-                                                                i.get('episode') or 0))
-            self._mark_problems()
+            items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
+                                                          i.get('episode') or 0))
+            _mark_problems(items)              # before publishing: readers on other threads see finished items
+            self._items = items
             self._scanned = time.monotonic()
-            self.version += 1
+            digest = self._digest()
+            if digest != self._last_digest:    # only a real change bumps the version (the window rebuilds on it)
+                self._last_digest = digest
+                self.version += 1
             return self._items
+
+    def _digest(self):
+        keys = ('id', 'path', 'title', 'year', 'kind', 'show', 'season', 'episode', 'kids', 'hidden', 'collection',
+                'problems', 'copies', 'size', 'format')
+        rows = [[i.get(k) for k in keys] for i in self._items]
+        return hashlib.sha1(json.dumps([rows, self.data['collections'], self.data['dismissed']],
+                                       sort_keys=True, default=str).encode()).hexdigest()
 
     def _tag_kids_once(self, fp):
         """A file first seen in a Kids folder gets a stored Kids tag, so it stays Kids if moved. Untagging it in the
@@ -250,53 +262,42 @@ class Library:
                 return cid
         return None
 
-    def _mark_problems(self):
-        eps = {}
-        for i in self._items:
-            i['problems'] = []
-            if not i['roku_ok']:
-                i['problems'].append(f"{i['format'].upper()} files usually don't play on Roku")
-            if i.get('copies'):
-                i['problems'].append(f"{i['copies']} copies of this file")
-            if i['kind'] == 'episode' and not i['hidden']:
-                eps.setdefault((i['show'].lower(), i['season']), []).append(i)
-        for (_, season), group in eps.items():
-            nums = {}
-            for i in group:
-                nums.setdefault(i['episode'], []).append(i)
-            for n, dup in nums.items():
-                if len(dup) > 1:
-                    for i in dup:
-                        i['problems'].append(f'Episode {n} appears {len(dup)} times')
-            have = sorted(nums)
-            missing = [n for n in range(1, have[-1] + 1) if n not in nums]
-            if missing:
-                last = max(group, key=lambda i: i['episode'])
-                last['problems'].append('Season %d is missing episode %s' % (season, ', '.join(map(str, missing))))
-
     # ------------------------------------------------------------------ edits
     def set_item(self, fp, **fields):
         """Override what PLAY read from the name. A value equal to the automatic one removes the override."""
+        self.set_items([fp], **fields)
+
+    def set_items(self, fps, **fields):
+        """The same edit on several titles: checked first, then saved and rescanned once."""
+        for k, v in fields.items():
+            if k not in OVERRIDABLE:
+                raise KeyError(k)
+            if not valid(k, v):
+                raise ValueError(f'{k} cannot be {v!r}')
         with self.lock:
-            cur = self.by_id(fp)
-            ov = dict(self.data['items'].get(fp, {}))
-            for k, v in fields.items():
-                if k not in OVERRIDABLE:
-                    raise KeyError(k)
-                if not valid(k, v):
-                    raise ValueError(f'{k} cannot be {v!r}')
-                if isinstance(v, str):
-                    v = v.strip()
-                if cur is not None and cur['auto'].get(k) == v:
-                    ov.pop(k, None)
-                else:
-                    ov[k] = v
-            if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
-                self.data['items'][fp] = ov
-            else:
-                self.data['items'].pop(fp, None)
+            for fp in fps:
+                self._override(fp, fields)
             self.save()
             self.scan()
+
+    def _override(self, fp, fields):
+        cur = self.by_id(fp, max_age=3600)
+        ov = dict(self.data['items'].get(fp, {}))
+        for k, v in fields.items():
+            if k not in OVERRIDABLE:
+                raise KeyError(k)
+            if not valid(k, v):
+                raise ValueError(f'{k} cannot be {v!r}')
+            if isinstance(v, str):
+                v = v.strip()
+            if cur is not None and cur['auto'].get(k) == v:
+                ov.pop(k, None)
+            else:
+                ov[k] = v
+        if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
+            self.data['items'][fp] = ov
+        else:
+            self.data['items'].pop(fp, None)
 
     def make_collection(self, name, members, order='year'):
         with self.lock:
@@ -442,3 +443,28 @@ def import_old_config(path):
             out.append({'path': f, 'kids': name.upper() == 'KIDS'})
     return out
 
+
+def _mark_problems(items):
+    """Flags on each item: formats Roku won't open, copies, doubled or missing episodes."""
+    eps = {}
+    for i in items:
+        i['problems'] = []
+        if not i['roku_ok']:
+            i['problems'].append(f"{i['format'].upper()} files usually don't play on Roku")
+        if i.get('copies'):
+            i['problems'].append(f"{i['copies']} copies of this file")
+        if i['kind'] == 'episode' and not i['hidden']:
+            eps.setdefault((i['show'].lower(), i['season']), []).append(i)
+    for (_, season), group in eps.items():
+        nums = {}
+        for i in group:
+            nums.setdefault(i['episode'], []).append(i)
+        for n, dup in nums.items():
+            if len(dup) > 1:
+                for i in dup:
+                    i['problems'].append(f'Episode {n} appears {len(dup)} times')
+        have = sorted(nums)
+        missing = [n for n in range(1, have[-1] + 1) if n not in nums]
+        if missing:
+            last = max(group, key=lambda i: i['episode'])
+            last['problems'].append('Season %d is missing episode %s' % (season, ', '.join(map(str, missing))))

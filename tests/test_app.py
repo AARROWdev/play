@@ -196,3 +196,102 @@ def test_close_hides_to_tray(win):
     win.close()
     if pa.QSystemTrayIcon.isSystemTrayAvailable():
         assert win.isHidden() and win.tray.msg
+
+
+def test_selection_handler_runs_once_per_change_after_many_refreshes(win, monkeypatch):
+    for _ in range(5):
+        win.refresh()
+    calls = []
+    real = win._detail_for
+    monkeypatch.setattr(win, '_detail_for', lambda its: calls.append(1) or real(its))
+    idx = win.model.index(0, 0)
+    win.view.selectionModel().select(idx, pa.QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                     | pa.QItemSelectionModel.SelectionFlag.Rows)
+    assert len(calls) == 1
+
+
+# ------------------------------------------------------------------ review fixes (2c7ec7f)
+def test_background_scans_dont_rebuild_or_wipe_typing(win, tmp_path):
+    from PySide6.QtTest import QTest
+    for n in range(60):
+        make(str(tmp_path / 'home'), 'Movie %02d.mkv' % n)
+    win.lib.scan()
+    win.refresh()
+    win.resize(900, 400)
+    pick(win, 'Movie 40')
+    win.view.verticalScrollBar().setValue(win.view.verticalScrollBar().maximum())
+    pos = win.view.verticalScrollBar().value()
+    QTest.keyClicks(win.d_title, ' typed')
+    v = win.lib.version
+    rebuilt = []
+    real_refresh = win.refresh
+    win.refresh = lambda: rebuilt.append(1) or real_refresh()
+    for _ in range(3):
+        win.scanner._run()                     # what the 1.5 s timer does, synchronously
+        win._changed()
+    assert win.lib.version == v and rebuilt == []
+    assert win.d_title.text() == 'Movie 40 typed'
+    win.refresh()                              # even a real rebuild keeps the scroll and the typing
+    assert win.view.verticalScrollBar().value() == pos and win.d_title.text() == 'Movie 40 typed'
+
+
+def test_a_real_change_still_refreshes(win, tmp_path):
+    v = win.lib.version
+    make(str(tmp_path / 'home'), 'Brand New 2020.mkv')
+    win.scanner._run()
+    assert win.lib.version == v + 1
+
+
+def test_multi_select_edit_scans_once(win, monkeypatch):
+    pick(win, 'Conor', 'Clip', 'Jungle World')
+    calls = []
+    real = win.lib.scan
+    monkeypatch.setattr(win.lib, 'scan', lambda: calls.append(1) or real())
+    win.d_kids.click()
+    assert len(calls) == 1
+
+
+def test_busy_port_keeps_the_working_server(win, monkeypatch):
+    import socket
+    blocker = socket.socket()
+    blocker.bind(('0.0.0.0', 0))
+    blocker.listen()
+    busy = blocker.getsockname()[1]
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: None)
+    old = win.srv.port
+    saved = win.lib.data['port']
+    assert win.restart_server(busy) is False
+    blocker.close()
+    assert win.srv.running and win.srv.port == old and win.lib.data['port'] == saved
+
+
+def test_season_zero_specials(win):
+    assert win.d_season.minimum() == 0
+
+
+def test_no_tray_closing_quits(win, monkeypatch):
+    quit_called = []
+    monkeypatch.setattr(pa.QSystemTrayIcon, 'isSystemTrayAvailable', staticmethod(lambda: False))
+    monkeypatch.setattr(QApplication.instance(), 'quit', lambda: quit_called.append(1))
+    win.show()
+    win.close()
+    assert quit_called == [1]
+
+
+def test_autostart_only_counts_this_install(monkeypatch):
+    import winreg
+    vals = {}
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(winreg, 'OpenKey', lambda *a: Key())
+    monkeypatch.setattr(winreg, 'QueryValueEx', lambda k, n: (vals[n], 1) if n in vals else (_ for _ in ()).throw(OSError()))
+    assert pa.get_autostart() is False
+    vals['PLAY'] = pa.launch_command()
+    assert pa.get_autostart() is True
+    vals['PLAY'] = r'"C:\Old\PLAY.exe" --tray'
+    assert pa.get_autostart() is False

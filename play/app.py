@@ -61,12 +61,14 @@ def launch_command():
 
 
 def get_autostart():
+    """True only if the Run entry starts this copy of PLAY (not an old or moved install)."""
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            return bool(winreg.QueryValueEx(k, APP)[0])
+            v = winreg.QueryValueEx(k, APP)[0]
     except OSError:
         return False
+    return isinstance(v, str) and os.path.normcase(v.strip()) == os.path.normcase(launch_command())
 
 
 def set_autostart(on):
@@ -90,7 +92,7 @@ class Scanner(QObject):
         super().__init__()
         self.lib = lib
         self.busy = False
-        self.seen = -1
+        self.seen = lib.version          # the window draws what the library has now; only later changes count
 
     def kick(self):
         if self.busy:
@@ -284,7 +286,7 @@ class Window(QMainWindow):
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(QLabel('Files are never renamed or moved'))
-        scanner.changed.connect(self.refresh)
+        scanner.changed.connect(self._changed)
         self.timer = QTimer(self, interval=1500, timeout=self._tick)
         self.timer.start()
         self.refresh()
@@ -325,7 +327,6 @@ class Window(QMainWindow):
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(280)
         self.search.textChanged.connect(self.refresh)
-        QAction(self, shortcut='Ctrl+F', triggered=self.search.setFocus)
         f = QAction(self)
         f.setShortcut('Ctrl+F')
         f.triggered.connect(lambda: self.search.setFocus())
@@ -356,7 +357,7 @@ class Window(QMainWindow):
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._menu)
         self.view.doubleClicked.connect(self._double)
-        self.view.selectionModel()
+        self.view.selectionModel().selectionChanged.connect(self._sel_changed)   # once: it outlives model.clear()
         v.addWidget(self.view, 1)
         return w
 
@@ -399,7 +400,7 @@ class Window(QMainWindow):
         self.d_showname = QLineEdit()
         self.d_showname.setPlaceholderText('Show name')
         self.d_season, self.d_ep = QSpinBox(), QSpinBox()
-        self.d_season.setRange(1, 99)
+        self.d_season.setRange(0, 99)          # season 0 = specials
         self.d_ep.setRange(1, 999)
         self.d_season.setPrefix('S ')
         self.d_ep.setPrefix('E ')
@@ -466,9 +467,15 @@ class Window(QMainWindow):
                 or (f == 'kids' and i['kids']) or (f == 'attention' and i['problems'])
                 or (f == 'collections' and i['collection']))
 
+    def _changed(self):
+        if self.lib.version != getattr(self, 'drawn', None):   # only rebuild for something not on screen yet
+            self.refresh()
+
     def refresh(self):
+        self.drawn = self.lib.version
         items = self.lib._items
         selected = set(self.selected_ids())
+        scroll = self.view.verticalScrollBar().value()
         self._rail_counts(items)
         self._banner()
         self.model.clear()
@@ -489,8 +496,8 @@ class Window(QMainWindow):
         for c in range(1, len(cols)):
             h.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self._reselect(selected)
-        self.view.selectionModel().selectionChanged.connect(self._sel_changed)
         self._sel_changed()
+        self.view.verticalScrollBar().setValue(scroll)
         self._status()
 
     def _rail_counts(self, items):
@@ -610,7 +617,10 @@ class Window(QMainWindow):
         one = its[0] if len(its) == 1 else None
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
         self.d_title.setEnabled(bool(one))
-        self.d_title.setText(one['title'] if one else '')
+        same = one and getattr(self, '_title_for', None) == one['id']
+        if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
+            self.d_title.setText(one['title'] if one else '')
+        self._title_for = one['id'] if one else None
         kinds = {i['kind'] for i in its}
         self.d_movie.setChecked(kinds == {'movie'})
         self.d_show.setChecked(kinds == {'episode'})
@@ -638,8 +648,7 @@ class Window(QMainWindow):
 
     # ---- edits
     def _set_all(self, **kv):
-        for i in self.sel:
-            self.lib.set_item(i['id'], **kv)
+        self.lib.set_items([i['id'] for i in self.sel], **kv)
         self.refresh()
 
     def _title_done(self):
@@ -735,17 +744,28 @@ class Window(QMainWindow):
             set_autostart(auto)
         except OSError as e:
             QMessageBox.warning(self, 'PLAY', f'Could not change "Start with Windows": {e}')
-        if port != self.lib.data['port'] or not self.srv.running:
-            self.lib.set_value('port', port)
-            self.restart_server()
+        if port != self.srv.port or not self.srv.running:
+            self.restart_server(port)
         self.scanner.kick()
 
-    def restart_server(self):
+    def restart_server(self, port=None):
+        """Restart on `port` (default: the saved one). If that port is busy, go back to the old one and say so;
+        the new port is only saved once it works."""
+        old = self.srv.port
+        new = self.lib.data['port'] if port is None else port
         self.srv.stop()
-        self.srv.port = self.lib.data['port']
-        if not self.srv.start():
-            QMessageBox.warning(self, 'PLAY', self.srv.error)
+        self.srv.port = new
+        ok = self.srv.start()
+        if ok and new != self.lib.data['port']:
+            self.lib.set_value('port', new)
+        if not ok:
+            err = self.srv.error
+            if new != old:
+                self.srv.port = old
+                self.srv.start()
+            QMessageBox.warning(self, 'PLAY', err)
         self._status()
+        return ok
 
     def closeEvent(self, e):
         if QSystemTrayIcon.isSystemTrayAvailable() and getattr(self, 'tray', None):
@@ -755,8 +775,9 @@ class Window(QMainWindow):
                 self._told = True
                 self.tray.showMessage('PLAY is still running', 'Your TVs can keep watching. Right-click the '
                                       'PLAY icon to quit.', play_icon(), 4000)
-        else:
+        else:                          # no tray to live in: closing the window quits PLAY
             e.accept()
+            QApplication.instance().quit()
 
 
 EXTRA_QSS = """
@@ -790,6 +811,7 @@ def main(argv=None):
     if sock.waitForConnected(300):
         sock.write(b'show')
         sock.waitForBytesWritten(300)
+        sock.disconnectFromServer()
         return 0
     try:   # the uninstaller checks this mutex and asks you to quit PLAY first
         import ctypes
@@ -818,8 +840,15 @@ def main(argv=None):
     listener = QLocalServer()
     QLocalServer.removeServer(INSTANCE_KEY)
     listener.listen(INSTANCE_KEY)
-    listener.newConnection.connect(lambda: (listener.nextPendingConnection(), w.showNormal(), w.raise_(),
-                                            w.activateWindow()))
+    def second_launch():
+        conn = listener.nextPendingConnection()
+        if conn:
+            conn.disconnected.connect(conn.deleteLater)
+            conn.disconnectFromServer()
+        w.showNormal()
+        w.raise_()
+        w.activateWindow()
+    listener.newConnection.connect(second_launch)
     scanner.kick()
     if '--tray' not in argv:
         w.show()
