@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import socket
+import time
 
 import pytest
 
@@ -168,3 +169,70 @@ def test_invalid_range_gets_whole_file(srv):
 
 def test_m2ts_type():
     assert server.TYPES['m2ts'] == 'video/mp2t'
+
+
+# ------------------------------------------------------------------ baseline fixes (B5, B7, B41, B42, B53)
+@pytest.mark.parametrize('host,ok', [('127.0.0.1:8600', True), ('10.0.0.5', True), ('[::1]:8600', True),
+                                     ('localhost:8600', True), ('rebind.attacker.example:8600', False),
+                                     ('evil.example', False), ('', True)])
+def test_host_header_check(srv, host, ok):
+    c = http.client.HTTPConnection('127.0.0.1', srv.port, timeout=5)
+    c.putrequest('GET', '/api/tv?side=home', skip_host=True)
+    if host:
+        c.putheader('Host', host)
+    c.endheaders()
+    r = c.getresponse()
+    body = r.read()
+    c.close()
+    assert (r.status == 200) is ok and (b'Jungle' in body) is ok
+
+
+def test_this_pcs_name_is_an_allowed_host(srv):
+    assert server.host_allowed(socket.gethostname() + ':8600')
+
+
+def test_discovery_survives_stray_packets(srv):
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.sendto(b'x' * 4000, ('127.0.0.1', srv.discovery_port))          # oversized
+    gone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)             # asks, then leaves before the answer
+    gone.sendto(b'PLAY-DISCOVER', ('127.0.0.1', srv.discovery_port))
+    gone.close()
+    time.sleep(0.3)
+    u.settimeout(3)
+    u.sendto(b'PLAY-DISCOVER', ('127.0.0.1', srv.discovery_port))
+    d = json.loads(u.recvfrom(512)[0])
+    u.close()
+    assert d['name'] == 'PLAY'
+
+
+def test_discovery_port_in_use_is_reported(srv):
+    other = server.PlayServer(srv.lib, port=0, discovery_port=srv.discovery_port)
+    assert other.start() and other.discovery_error and str(srv.discovery_port) in other.discovery_error
+    other.stop()
+
+
+def test_info_has_the_pcs_address(srv):
+    d = json.loads(get(srv, '/api/info')[1])
+    assert 'ip' in d
+
+
+def test_cut_short_response_closes_the_connection(srv, monkeypatch):
+    seen = {}
+    real = server._Handler._stream
+
+    def boom(self, fp, head):
+        try:
+            raise TimeoutError('client stopped reading')
+        finally:
+            seen['h'] = self
+    monkeypatch.setattr(server._Handler, '_stream', boom)
+    c = http.client.HTTPConnection('127.0.0.1', srv.port, timeout=5)
+    c.request('GET', '/media/' + jp(srv)['id'])
+    try:
+        c.getresponse().read()
+    except (http.client.RemoteDisconnected, ConnectionError):
+        pass
+    c.close()
+    time.sleep(0.2)
+    assert seen['h'].close_connection is True
+    monkeypatch.setattr(server._Handler, '_stream', real)
