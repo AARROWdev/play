@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="MainScene" extends="Scene">
+    <children>
+        <Rectangle width="1920" height="1080" color="0x101014FF" />
+        <Label id="header" text="PLAY" translation="[120,60]" width="1680" height="80"
+               font="font:LargeBoldSystemFont" color="0xFFFFFFFF" />
+        <Label id="status" text="" translation="[120,150]" width="1680" height="50"
+               font="font:SmallSystemFont" color="0x9A9AA8FF" />
+        <Label id="hint" text="" translation="[120,990]" width="1680" height="40"
+               font="font:SmallSystemFont" color="0x6E6E7AFF" />
+        <ButtonGroup id="menu" translation="[660,380]" minWidth="600" buttonHeight="140"
+                     itemSpacings="[40]" textFont="font:LargeBoldSystemFont" focusedTextFont="font:LargeBoldSystemFont"
+                     buttons="[&quot;HOME&quot;,&quot;KIDS&quot;]" />
+        <ButtonGroup id="typeMenu" translation="[660,380]" minWidth="600" buttonHeight="140" visible="false"
+                     itemSpacings="[40]" textFont="font:LargeBoldSystemFont" focusedTextFont="font:LargeBoldSystemFont"
+                     buttons="[&quot;MOVIES&quot;,&quot;SHOWS&quot;]" />
+        <Group id="searchBar" translation="[120,220]" visible="false">
+            <Rectangle id="searchBg" width="1680" height="76" color="0x24242EFF" />
+            <Label id="searchText" text="Search" translation="[30,0]" width="1620" height="76"
+                   vertAlign="center" font="font:MediumSystemFont" color="0x9A9AA8FF" />
+        </Group>
+        <LabelList id="list" translation="[120,330]" itemSize="[1680,64]" numRows="11" visible="false"
+                   vertFocusAnimationStyle="floatingFocus"
+                   color="0xD8D8E0FF" focusedColor="0x101014FF" focusBitmapBlendColor="0xF2C14EFF" />
+        <Video id="video" width="1920" height="1080" visible="false" />
+    </children>
+    <script type="text/brightscript" uri="MainScene.brs" />
+</component>

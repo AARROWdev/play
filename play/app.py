@@ -1,4 +1,5 @@
 """PLAY for Windows: the library window, settings and tray icon. The movie server runs inside this program."""
+import html
 import os
 import subprocess
 import sys
@@ -522,9 +523,12 @@ class Window(QMainWindow):
         self.banner.setVisible(bool(self.suggestion))
         if self.suggestion:
             s = self.suggestion
-            self.banner_text.setText(f'<b>Looks like a collection:</b> {len(s["members"])} films start with '
-                                     f'"{s["key"].title()}". Group them as <b>{s["name"]}</b> so the TV shows one '
-                                     f'entry, in release order.')
+            if s['key'].startswith('folder:'):
+                why = f'{len(s["members"])} films share the folder "{html.escape(s["name"])}"'
+            else:
+                why = f'{len(s["members"])} films start with "{html.escape(s["key"].title())}"'
+            self.banner_text.setText(f'<b>Looks like a collection:</b> {why}. Group them as '
+                                     f'<b>{html.escape(s["name"])}</b> so the TV shows one entry, in release order.')
 
     def _row(self, i):
         coll = self.lib.data['collections'].get(i['collection'], {}).get('name', '') if i['collection'] else ''

@@ -295,3 +295,13 @@ def test_autostart_only_counts_this_install(monkeypatch):
     assert pa.get_autostart() is True
     vals['PLAY'] = r'"C:\Old\PLAY.exe" --tray'
     assert pa.get_autostart() is False
+
+
+def test_folder_suggestion_banner_names_the_folder_not_the_path(win, tmp_path):
+    for rel in ['The Thin Man (1934).mkv', 'After the Thin Man (1936).mkv']:
+        make(str(tmp_path / 'home' / 'The Thin Man'), rel)
+    win.lib.dismiss('jungle')
+    win.lib.scan()
+    win.refresh()
+    t = win.banner_text.text()
+    assert 'the folder "The Thin Man"' in t and str(tmp_path) not in t and 'Folder:' not in t
