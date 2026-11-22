@@ -87,6 +87,8 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
         }
+        for f in self.data['folders']:          # a hand-edited "kids": "false" must not tag the folder
+            f['kids'] = f.get('kids') is True
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._items = []

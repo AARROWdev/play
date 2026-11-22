@@ -297,3 +297,8 @@ def test_plain_movies_subfolder_is_not_a_collection(lib, tmp_path):
     for rel in ['Heat 1995.mkv', 'Fargo 1996.mkv', 'Big 1988.mkv']:
         make(str(tmp_path / 'home' / 'Movies'), rel)
     assert not any(s['key'].startswith('folder:') for s in lib.suggestions())
+
+
+def test_folder_kids_flag_must_be_true(tmp_path):
+    (tmp_path / 'library.json').write_text('{"folders": [{"path": "D:/media", "kids": "false"}]}')
+    assert library.Library(str(tmp_path)).folders[0]['kids'] is False
