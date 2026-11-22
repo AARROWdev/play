@@ -263,3 +263,37 @@ def test_subfolder_is_offered_as_collection(lib, tmp_path):
     assert not any(s['key'] == 'alien' for s in lib.suggestions())
     lib.dismiss(sug['key'])
     assert not any(s['key'].startswith('folder:') for s in lib.suggestions())
+
+
+# ------------------------------------------------------------------ review fixes (e430830)
+def test_string_year_is_refused_and_views_keep_working(lib):
+    ids = [find(lib, t)['id'] for t in ('Jungle Park', 'Jungle World')]
+    lib.make_collection('JP', ids)
+    for bad in [dict(year='2009'), dict(title=7), dict(title='  '), dict(kids='yes'), dict(kind='film'),
+                dict(year=True), dict(season=-1)]:
+        with pytest.raises(ValueError):
+            lib.set_item(ids[0], **bad)
+    lib.tv_view()
+    assert library.Library(lib.dir).tv_view()['movies']
+
+
+def test_hand_edited_bad_values_are_ignored(lib):
+    jp, ep = find(lib, 'Jungle Park'), find(lib, 'Ann Droid S01E01')
+    ids = [jp['id'], find(lib, 'Jungle World')['id']]
+    lib.make_collection('JP', ids)
+    lib.data['items'][jp['id']] = {'year': '2009', 'title': 7, 'kids': 'yes'}
+    lib.data['items'][ep['id']] = {'show': 5}
+    lib.data['folders'].append({'path': 5})
+    lib.save()
+    again = library.Library(lib.dir)
+    assert again.by_id(jp['id'])['year'] == 1993 and again.by_id(jp['id'])['title'] == 'Jungle Park'
+    assert again.by_id(ep['id'])['show'] == 'Ann Droid'
+    assert again.tv_view()['movies'] and len(again.folders) == 2
+    with pytest.raises(ValueError):
+        again.set_folders([{'path': 5}])
+
+
+def test_plain_movies_subfolder_is_not_a_collection(lib, tmp_path):
+    for rel in ['Heat 1995.mkv', 'Fargo 1996.mkv', 'Big 1988.mkv']:
+        make(str(tmp_path / 'home' / 'Movies'), rel)
+    assert not any(s['key'].startswith('folder:') for s in lib.suggestions())

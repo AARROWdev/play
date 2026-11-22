@@ -32,6 +32,19 @@ def fingerprint(path, size):
     return h.hexdigest()[:16]
 
 
+def valid(key, v):
+    """Is v an allowed value for an item field? Guards both edits and hand-edited library.json."""
+    if key in ('title', 'show'):
+        return isinstance(v, str) and v.strip() != '' or (key == 'show' and v is None)
+    if key in ('year', 'season', 'episode'):
+        return v is None or (isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 9999)
+    if key in ('kids', 'hidden'):
+        return isinstance(v, bool)
+    if key == 'kind':
+        return v in ('movie', 'episode')
+    return False
+
+
 def _dict(v):
     return v if isinstance(v, dict) else {}
 
@@ -62,13 +75,15 @@ class Library:
         d = _read_json(self.path, {})
         self.data = {
             'version': 1,
-            'folders': [f for f in d.get('folders', []) if isinstance(f, dict) and f.get('path')],
+            'folders': [f for f in (d.get('folders') if isinstance(d.get('folders'), list) else [])
+                        if isinstance(f, dict) and isinstance(f.get('path'), str) and f['path'].strip()],
             'port': int(d.get('port', 8600)) if str(d.get('port', '')).isdigit() else 8600,
             'skin': d.get('skin', 'Blue'),
             'items': {k: v for k, v in _dict(d.get('items')).items() if isinstance(v, dict)},
             'collections': {k: v for k, v in _dict(d.get('collections')).items()
                             if isinstance(v, dict) and isinstance(v.get('name'), str)
-                            and isinstance(v.get('members'), list)},
+                            and isinstance(v.get('members'), list)
+                            and all(isinstance(m, str) for m in v['members'])},
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
         }
@@ -92,6 +107,8 @@ class Library:
         with self.lock:
             seen, out = set(), []
             for f in folders:
+                if not isinstance(f.get('path'), str) or not f['path'].strip():
+                    raise ValueError(f'folder path cannot be {f.get("path")!r}')
                 p = os.path.abspath(f['path'])
                 if os.path.normcase(p) not in seen:
                     seen.add(os.path.normcase(p))
@@ -204,7 +221,7 @@ class Library:
         it['auto'] = {k: it.get(k) for k in OVERRIDABLE}
         ov = self.data['items'].get(fp, {})
         for k in OVERRIDABLE:
-            if k in ov:
+            if k in ov and valid(k, ov[k]):       # a bad hand-edited value is ignored, not fatal
                 it[k] = ov[k]
         if it['kind'] == 'episode' and not (it.get('show') and isinstance(it.get('season'), int)
                                              and isinstance(it.get('episode'), int)):
@@ -257,6 +274,10 @@ class Library:
             for k, v in fields.items():
                 if k not in OVERRIDABLE:
                     raise KeyError(k)
+                if not valid(k, v):
+                    raise ValueError(f'{k} cannot be {v!r}')
+                if isinstance(v, str):
+                    v = v.strip()
                 if cur is not None and cur['auto'].get(k) == v:
                     ov.pop(k, None)
                 else:
@@ -343,6 +364,10 @@ class Library:
             for d, g in sorted(by_dir.items()):
                 key = 'folder:' + os.path.normcase(d)
                 if len(g) < 2 or key in self.data['dismissed']:
+                    continue
+                # 'Alien Saga/' with Alien films, yes; a plain 'Movies/' folder of unrelated films, no
+                words = {w for w in names.clean(os.path.basename(d)).lower().split() if len(w) >= 3}
+                if sum(any(t.startswith(w) for w in words for t in i['title'].lower().split()) for i in g) < 2:
                     continue
                 g.sort(key=lambda i: (i.get('year') or 9999, names.sort_key(i['title'])))
                 out.append({'key': key, 'name': names.clean(os.path.basename(d)) or g[0]['title'],
