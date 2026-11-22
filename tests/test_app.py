@@ -316,10 +316,3 @@ def test_plays_on_roku_column_is_about_the_format_only(win, tmp_path):
         rows[win.model.item(r, 0).text()] = (win.model.item(r, 6).text(), win.model.item(r, 6).toolTip())
     assert rows['Ann Droid S01E04'][0] == 'Yes' and 'missing episode 3' in rows['Ann Droid S01E04'][1]
     assert rows['Clip'][0] == 'Check'
-
-
-def test_already_running_uses_the_mutex():
-    import uuid
-    names = ('PLAYTest-' + uuid.uuid4().hex,)
-    assert pa.already_running(names) is False
-    assert pa.already_running(names) is True

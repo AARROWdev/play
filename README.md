@@ -37,6 +37,8 @@ was used to install, turn it on once from PLAY's Settings while signed in as you
 `Show Name S01E02.mkv` for episodes. Anything PLAY gets wrong can be fixed in the window.
 
 **Uninstall:** Settings > Apps > PLAY > Uninstall. This removes the firewall rule and the start-with-Windows entry.
+If you turned on "Start PLAY with Windows" from Settings while signed in as a different Windows user than the one
+uninstalling, switch it off there first (Windows only lets the uninstaller change its own account's entry).
 Your tags and collections stay in `%APPDATA%\PLAY\` (delete the folder to remove them too). Your media is untouched.
 
 ## How it works

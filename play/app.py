@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QSpinBox, QSplitter, QSystemTrayIcon, QTreeView, QVBoxLayout, QWidget)
 
 import suite_style
-from . import library, names, server, skins
+from . import instance, library, names, server, skins
 
 APP = 'PLAY'
 INSTANCE_KEY = 'PLAY-library-window'
@@ -158,10 +158,19 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.skin)
         grid.addSpacing(24)
         self.auto = QCheckBox('Start PLAY with Windows')
-        self.auto.setChecked(get_autostart())
+        self.auto_was = get_autostart()
+        self.auto.setChecked(self.auto_was)
         grid.addWidget(self.auto)
         grid.addStretch()
         v.addLayout(grid)
+        row2 = QHBoxLayout()
+        restart = QPushButton('Restart server')
+        restart.setObjectName('chip')
+        restart.setToolTip('Stop and start the movie server, e.g. after the network changed')
+        restart.clicked.connect(lambda: parent.restart_server())
+        row2.addWidget(restart)
+        row2.addStretch()
+        v.addLayout(row2)
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Save).setObjectName('primary')
         bb.accepted.connect(self.accept)
@@ -745,8 +754,9 @@ class Window(QMainWindow):
         self.lib.set_folders(folders)
         self.lib.set_value('skin', skin)
         apply_skin(QApplication.instance(), skin)
-        try:
-            set_autostart(auto)
+        try:   # only when the box was changed: another copy (portable, from source) mustn't remove this one's
+            if auto != d.auto_was:
+                set_autostart(auto)
         except OSError as e:
             QMessageBox.warning(self, 'PLAY', f'Could not change "Start with Windows": {e}')
         if port != self.srv.port or not self.srv.running:
@@ -805,38 +815,16 @@ def apply_skin(app, name):
     return t
 
 
-MUTEX_NAMES = ('PLAYAppMutex', 'Global\\PLAYAppMutex')
-ERROR_ALREADY_EXISTS = 183
-ERROR_ACCESS_DENIED = 5
-
-
-def already_running(names=MUTEX_NAMES):
-    """Take the PLAY mutexes (held until exit). True if another PLAY already holds them."""
-    import ctypes
-    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    k32.CreateMutexW.restype = ctypes.c_void_p
-    taken, existed = [], False
-    for n in names:
-        h = k32.CreateMutexW(None, False, n)
-        err = ctypes.get_last_error()
-        # ACCESS_DENIED on the Global name = another Windows user is running PLAY (and holds the port)
-        if err == ERROR_ALREADY_EXISTS or (err == ERROR_ACCESS_DENIED and n.startswith('Global')):
-            existed = True
-        if h:
-            taken.append(h)
-    already_running.handles = getattr(already_running, 'handles', []) + taken
-    return existed
-
-
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
     app.setApplicationName(APP)
     app.setQuitOnLastWindowClosed(False)
-    # One PLAY at a time. The mutex says whether PLAY is already running (the uninstaller checks it too); if it is,
-    # this launch asks that copy to show its window and exits, and never starts a second server, even if the
-    # first copy is too busy to answer in time.
-    if already_running():
+    # One PLAY per PC. In this session: hand over to the running copy (it shows its window) and exit. For another
+    # Windows account: say so and exit. Never a second server. The hand-over listener starts before the first
+    # scan, so a launch during a slow startup scan still reaches it.
+    who = instance.check()
+    if who == instance.SAME_SESSION:
         sock = QLocalSocket()
         sock.connectToServer(INSTANCE_KEY)
         if sock.waitForConnected(5000):
@@ -844,6 +832,28 @@ def main(argv=None):
             sock.waitForBytesWritten(1000)
             sock.disconnectFromServer()
         return 0
+    if who == instance.OTHER_SESSION:
+        QMessageBox.information(None, 'PLAY', 'PLAY is already running for another Windows user on this PC. '
+                                'Only one copy can serve the TVs, so this one will close.')
+        return 0
+    shown = {'window': None, 'pending': False}
+    listener = QLocalServer()
+    QLocalServer.removeServer(INSTANCE_KEY)
+    listener.listen(INSTANCE_KEY)
+
+    def second_launch():
+        conn = listener.nextPendingConnection()
+        if conn:
+            conn.disconnected.connect(conn.deleteLater)
+            conn.disconnectFromServer()
+        w_ = shown['window']
+        if w_ is None:
+            shown['pending'] = True          # still starting up: show the window once it exists
+        else:
+            w_.showNormal()
+            w_.raise_()
+            w_.activateWindow()
+    listener.newConnection.connect(second_launch)
     lib = library.Library()
     t = apply_skin(app, lib.data['skin'])
     app.setWindowIcon(play_icon(t['accent']))
@@ -862,20 +872,9 @@ def main(argv=None):
     tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and (w.showNormal(), w.activateWindow()))
     tray.show()
     w.tray = tray
-    listener = QLocalServer()
-    QLocalServer.removeServer(INSTANCE_KEY)
-    listener.listen(INSTANCE_KEY)
-    def second_launch():
-        conn = listener.nextPendingConnection()
-        if conn:
-            conn.disconnected.connect(conn.deleteLater)
-            conn.disconnectFromServer()
-        w.showNormal()
-        w.raise_()
-        w.activateWindow()
-    listener.newConnection.connect(second_launch)
+    shown['window'] = w
     scanner.kick()
-    if '--tray' not in argv:
+    if '--tray' not in argv or shown['pending']:
         w.show()
     if not lib.folders:
         w.show()

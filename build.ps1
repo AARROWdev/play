@@ -4,7 +4,9 @@
 #   dist\PLAY-<ver>-portable-win64.zip  the portable version
 #   dist\PLAY-roku.zip                  the Roku app package
 # Needs: .venv with requirements + pyinstaller, and Inno Setup 6 (winget install JRSoftware.InnoSetup).
-$ErrorActionPreference = 'Stop'
+# 'Continue', with every native step checked through $LASTEXITCODE: under 'Stop', Windows PowerShell 5.1 turns
+# PyInstaller's ordinary stderr log into a fatal error when the output is redirected (.\build.ps1 *> build.log).
+$ErrorActionPreference = 'Continue'
 Set-Location $PSScriptRoot
 Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -21,7 +23,7 @@ if ($LASTEXITCODE) { throw "icon failed ($LASTEXITCODE)" }
 if ($LASTEXITCODE) { throw "PyInstaller failed ($LASTEXITCODE)" }
 
 $app = 'build\dist\PLAY'
-Copy-Item README.md, LICENSE, NAMING.md $app
+Copy-Item README.md, LICENSE, NAMING.md $app -ErrorAction Stop
 
 $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (-not $iscc) {

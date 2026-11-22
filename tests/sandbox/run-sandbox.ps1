@@ -22,7 +22,7 @@ New-Item -ItemType Directory $out | Out-Null
 if (Get-Process WindowsSandbox* -ErrorAction SilentlyContinue) { throw 'A Windows Sandbox is already running; close it first' }
 Start-Process "$out\play.wsb" -WindowStyle Minimized
 $deadline = (Get-Date).AddMinutes($Minutes)
-while ((Get-Date) -lt $deadline -and -not ((Test-Path "$out\results.txt") -and (Select-String -Path "$out\results.txt" -Pattern '^DONE' -Quiet))) {
+while ((Get-Date) -lt $deadline -and -not ((Test-Path "$out\results.txt") -and (Select-String -Path "$out\results.txt" -Pattern '^DONE' -Quiet -ErrorAction SilentlyContinue))) {
     Start-Sleep 5
 }
 if (Test-Path "$out\results.txt") { Get-Content "$out\results.txt" } else { Write-Host "No results after $Minutes minutes ($out)" }

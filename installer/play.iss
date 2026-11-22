@@ -58,7 +58,16 @@ Filename: "{app}\PLAY.exe"; Description: "{cm:LaunchProgram,PLAY}"; Flags: nowai
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""PLAY"""; Flags: runhidden; RunOnceId: "PLAYFirewall"
 
 [Code]
+// Reinstalling or upgrading with "Start PLAY with Windows" unticked means: don't start it. [Registry] only adds.
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and not WizardIsTaskSelected('autostart') then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'PLAY');
+end;
+
 // The Settings checkbox can add the Run entry after install; remove it on uninstall either way.
+// (Only this account's: if another account turned it on in its own Settings, Windows keeps that entry, and it
+// simply finds nothing to start. README says to switch it off in Settings before uninstalling.)
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
