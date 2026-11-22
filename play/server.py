@@ -44,10 +44,10 @@ _ips_cache = (0.0, [])
 
 
 def lan_ips(max_age=30.0):
-    """This PC's private IPv4 addresses (what a TV would type), most likely first. A Tailscale/CGNAT address
-    (100.64.0.0/10) is never offered. A VPN's private address can't be told from the home network's by its number,
-    so the window shows the first two: home routers mostly use 192.168.x.x, and that comes first. Cached for 30 s:
-    the window asks every 1.5 s."""
+    """This PC's private IPv4 addresses (what a TV would type), most likely first: the default route, then
+    192.168.x.x, then the rest. A Tailscale/CGNAT address (100.64.0.0/10) is never offered. A VPN's or a virtual
+    machine adapter's private address can't be told from the home network's by its number, so the window shows up to
+    three. Cached for 30 s (the window asks every 1.5 s); forget_lan_ips() starts over."""
     global _ips_cache
     t, ips = _ips_cache
     if time.monotonic() - t < max_age and t:

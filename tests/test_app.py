@@ -707,11 +707,17 @@ def test_settle_instance_hands_over_when_answered():
     assert who == pa.instance.SAME_SESSION
 
 
-def test_autostart_is_offered_once_per_user(tmp_path):
-    lb = library.Library(str(tmp_path))
-    assert lb.data['autostart_offered'] is False                  # a zip trial run never sets it (not installed)
-    lb.set_value('autostart_offered', True)
-    assert library.Library(str(tmp_path)).data['autostart_offered'] is True
+def test_autostart_is_offered_once_per_user(tmp_path, monkeypatch):
+    writes = []
+    monkeypatch.setattr(pa, 'set_autostart', lambda on: writes.append(on))
+    lb = library.Library(str(tmp_path / 'a'))
+    assert pa.offer_autostart(lb, installed=False) is False and writes == []    # a zip or portable run
+    assert pa.offer_autostart(lb, installed=True) is True and writes == [True]   # the installed copy, first start
+    assert pa.offer_autostart(lb, installed=True) is False and writes == [True]  # once: switching it off sticks
+    assert library.Library(lb.dir).data['autostart_offered'] is True
+    ro = library.Library(str(tmp_path / 'b'))
+    ro.read_only = True
+    assert pa.offer_autostart(ro, installed=True) is False and writes == [True]  # can't record it: leave it
 
 
 def test_refused_host_is_shown_as_plain_text(win):

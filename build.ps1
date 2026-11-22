@@ -13,7 +13,7 @@ Set-Location $PSScriptRoot
 function Invoke-Step([string]$what, [scriptblock]$cmd) {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $cmd 2>&1 | ForEach-Object { "$_" } | Out-Host } finally { $ErrorActionPreference = $old }
+    try { & $cmd 2>&1 | ForEach-Object { "$_" } } finally { $ErrorActionPreference = $old }   # to the output stream: *> log catches it
     if ($LASTEXITCODE) { throw "$what failed ($LASTEXITCODE)" }
 }
 

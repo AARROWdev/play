@@ -553,8 +553,14 @@ sub onPosition()
     if m.current = invalid or m.video.state <> "playing" then return
     p = Int(m.video.position)
     if m.seekTo > 0
-        if p < m.seekTo - 10 then return       ' the seek to the resume point hasn't landed yet
-        m.seekTo = 0                           ' it has: from here on positions are real
+        ' Until the seek to the resume point lands, positions are the stream's start, not where you are. It has
+        ' landed once a position near the target arrives; if the file can't seek, playback just runs on from 0, and
+        ' once it is 20 s in without getting near the target, positions are real from then on.
+        if p >= m.seekTo - 10 or (m.seekSent and p >= 20)
+            m.seekTo = 0
+        else
+            return
+        end if
     end if
     if p - m.lastSave >= 30 or m.lastSave - p >= 30
         m.lastSave = p
@@ -584,7 +590,7 @@ end sub
 sub onState()
     s = m.video.state
     if s = "playing" and m.seekTo > 0 and not m.seekSent
-        m.video.seek = m.seekTo                ' m.seekTo stays set until a position near it arrives (onPosition)
+        m.video.seek = m.seekTo
         m.seekSent = true
     else if s = "error"
         savePos(true)

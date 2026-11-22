@@ -210,7 +210,7 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
-            'autostart_offered': d.get('autostart_offered') is True,
+            'autostart_offered': d.get('autostart_offered') is True or (bool(d) and 'autostart_offered' not in d),
         }
         self._migrate_old_episode_titles()
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
@@ -317,20 +317,20 @@ class Library:
                     real_roots.add(os.path.normcase(os.path.realpath(f['path'])))
                 except OSError:
                     pass
-            followed = set()                         # link targets followed in this scan, across all folders
-            raw, reached, new_pending, dirty, errored = {}, set(), {}, False, []
+            raw, reached, new_pending, dirty, errored, links_off = {}, set(), {}, False, [], []
             for f, root in zip(folders, roots):
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
-                files, ok, changed, errs = _walk(f['path'], others, cache, pending, new_pending, first,
-                                                 real_roots, followed)
+                files, ok, changed, errs, off = _walk(f['path'], others, cache, pending, new_pending, first,
+                                                      real_roots)
                 dirty = dirty or changed
                 if ok:
-                    # a subfolder that couldn't be listed keeps what it had: its titles don't vanish
-                    keep = [e for e in prev_raw.get(root, []) if _under(os.path.normcase(e[1]), errs)]
+                    # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
+                    keep = [e for e in prev_raw.get(root, []) if _under(os.path.normcase(e[1]), errs + off)]
                     have = {os.path.normcase(e[1]) for e in files}
                     raw[root] = files + [e for e in keep if os.path.normcase(e[1]) not in have]
                     reached.add(root)
-                    errored += errs
+                    errored += errs + off
+                    links_off += off
             unreachable = []
             for f, root in zip(folders, roots):
                 if root not in reached:              # NAS asleep, drive not mounted yet: keep what we had
@@ -347,7 +347,8 @@ class Library:
                 self._pending = new_pending
                 self._raw = raw
                 self._live_roots = reached
-                self.unreachable = unreachable + sorted(set(errored))   # folders and links that couldn't be read
+                # media folders and links that are offline (a subfolder Windows won't list isn't news)
+                self.unreachable = unreachable + sorted(set(links_off))
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
@@ -410,23 +411,25 @@ class Library:
     def _rebuild(self):
         """Items from the last walk plus the settings. In memory only; call with self.lock held."""
         self._col_of = {m: cid for cid, c in self.data['collections'].items() for m in c['members']}
-        found = {}
+        found, reals = {}, {}
         folders = [(f, os.path.normcase(os.path.abspath(f['path']))) for f in self.data['folders']]
         # folders the last walk reached first: a live copy of a file beats a remembered one on a missing drive
         for live in (True, False):
             for f, root in folders:
                 if (root in self._live_roots) != live:
                     continue
-                for fp, path, ext, size in self._raw.get(root, []):
+                for fp, path, ext, size, real in self._raw.get(root, []):
                     if f.get('kids') and self._tag_kids_once(fp):
                         self._save_after_scan = True
                         if fp in found:
                             found[fp]['kids'] = True
                     if fp in found:
-                        if live:                      # the same file twice (a copy): list it once
-                            found[fp]['copies'] = found[fp].get('copies', 1) + 1
+                        if live and real not in reals[fp]:  # the same file twice (a real copy): list it once
+                            reals[fp].add(real)
+                            found[fp]['copies'] = len(reals[fp])
                         continue
                     found[fp] = self._item(fp, path, f['path'], ext, size)
+                    reals[fp] = {real}
         items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
                                                       i.get('episode') or 0))
         _mark_problems(items)                  # before publishing: readers on other threads see finished items
@@ -724,68 +727,72 @@ def _dir_link(entry):
         return False
 
 
-def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=frozenset(), followed=None):
-    """One media folder. Returns ([(fp, path, ext, size)], could the folder be listed, did the cache change,
-    [normcased folders that couldn't be listed]).
+def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=frozenset()):
+    """One media folder. Returns ([(fp, path, ext, size, real)], could the folder be listed, did the cache change,
+    [normcased folders that couldn't be listed], [normcased links whose target is offline]).
 
-    Folders that are their own media folder (skip_roots) are left to their own walk. Junctions, mount points and
-    directory links are followed by their real location, and every folder reached that way is checked against the
-    media folders (real_roots) and the link targets already followed in this scan (followed, shared by all walks):
-    so nothing is walked twice (no false copies) and a link back up the tree can't loop. A link whose target is
-    offline is a listing error (its titles are kept). A new file waits until it has looked the same for SETTLE
-    seconds (still copying?), except at startup when it was last written over a minute ago; a known file that was
-    only re-stamped (same size) is re-read at once; a changed size or time means a fresh fingerprint."""
-    out, changed, errors = [], False, []
-    followed = set() if followed is None else followed
+    Every file is named and keyed by its path inside the media folder, through any link, so show and season names
+    come from the media folder and a fingerprint follows the path it was taken at. Junctions, mount points and
+    directory links are followed; where they really lead (realpath) only decides whether to go in: a target this
+    walk has already been through, or another media folder (which is walked on its own), is skipped, so a link
+    back up the tree can't loop and nothing is listed twice by one walk. 'real' is the file's real location, so a
+    file reached by two paths isn't counted as two copies. A link whose target is offline keeps its titles.
+    Folders that are their own media folder (skip_roots) are left to their own walk. A new file waits until it has
+    looked the same for SETTLE seconds (still copying?), except at startup when it was last written over a minute
+    ago; a known file that was only re-stamped (same size) is re-read at once; a changed size or time means a fresh
+    fingerprint."""
+    out, changed, errors, offline = [], False, [], []
     try:
         st = os.stat(root)
         if not statmod.S_ISDIR(st.st_mode):
-            return [], False, False, []
+            return [], False, False, [], []
+        root_real = os.path.normcase(os.path.realpath(root))
     except OSError:
-        return [], False, False, []
+        return [], False, False, [], []
+    other_roots = {r for r in real_roots if r != root_real}
+    visited = {root_real}                         # real folders this walk has been through (links only add)
     now_mono, now = time.monotonic(), time.time()
-    stack = [(root, False)]                       # (folder, reached through a link)
+    stack = [(root, root_real)]                   # (folder as named under the media folder, its real location)
     while stack:
-        d, via_link = stack.pop()
+        d, d_real = stack.pop()
         try:
             with os.scandir(d) as it:
                 entries = sorted(it, key=lambda e: e.name)
         except OSError:
             if d == root:
-                return [], False, False, []
+                return [], False, False, [], []
             errors.append(os.path.normcase(d))
             continue
         subdirs = []
         for e in entries:
-            if e.name.startswith('.') or e.name.lower() == '$recycle.bin':
-                continue
             if _dir_link(e):
+                if e.name.lower() == '$recycle.bin':
+                    continue
                 try:
                     real = os.path.normcase(os.path.realpath(e.path))
-                except OSError:
-                    errors.append(os.path.normcase(e.path))
+                    os.stat(e.path)
+                except OSError:                    # an unplugged target: keep its titles (they are keyed by e.path)
+                    offline.append(os.path.normcase(e.path))
                     continue
-                try:
-                    os.stat(real)
-                except OSError:                            # an unplugged target: keep what it had (files under a
-                    errors.append(real)                    # link are recorded by their real path)
-                    continue
-                if _under(real, real_roots) or _under(real, followed):
-                    continue                               # walked anyway, or already
-                followed.add(real)
-                subdirs.append((real, True))
+                if _under(real, visited) or _under(real, other_roots):
+                    continue                       # already walked by this walk, or another media folder's own
+                visited.add(real)
+                subdirs.append((e.path, real))
                 continue
             try:
                 is_dir = e.is_dir()
             except OSError:
                 continue
             if is_dir:
+                if e.name.startswith('.') or e.name.lower() in ('$recycle.bin', 'system volume information'):
+                    continue
                 key = os.path.normcase(e.path)
                 if key in skip_roots:
                     continue
-                if via_link and (key in real_roots or key in followed):
-                    continue                               # under a link, a media folder or link target: its own walk
-                subdirs.append((e.path, via_link))
+                sub_real = os.path.join(d_real, os.path.normcase(e.name))
+                if d_real != os.path.normcase(d) and (sub_real in visited or sub_real in other_roots):
+                    continue                       # under a link: a folder this walk (or another) covers already
+                subdirs.append((e.path, sub_real))
                 continue
             ext = os.path.splitext(e.name)[1].lower()
             if ext not in names.VIDEO_EXTS:
@@ -795,9 +802,10 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             except OSError:
                 continue
             key = os.path.normcase(e.path)
+            real_file = os.path.join(d_real, os.path.normcase(e.name))
             c = cache.get(key)
             if c and c[0] == fst.st_size and c[1] == fst.st_mtime_ns:
-                out.append((c[2], e.path, ext, fst.st_size))
+                out.append((c[2], e.path, ext, fst.st_size, real_file))
                 continue
             seen = pending.get(key)
             same = seen is not None and seen[0] == fst.st_size and seen[1] == fst.st_mtime_ns
@@ -814,9 +822,9 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
                 continue
             cache[key] = [fst.st_size, fst.st_mtime_ns, fp]
             changed = True
-            out.append((fp, e.path, ext, fst.st_size))
+            out.append((fp, e.path, ext, fst.st_size, real_file))
         stack.extend(reversed(subdirs))
-    return out, True, changed, errors
+    return out, True, changed, errors, offline
 
 
 def _tv(i):

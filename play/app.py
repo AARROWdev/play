@@ -492,7 +492,7 @@ class Window(QMainWindow):
     def _status(self):
         if self.srv.running:
             tvs = self.srv.tvs()
-            ips = server.lan_ips()[:2]
+            ips = server.lan_ips()[:3]
             where = ' or '.join(f'{ip}:{self.srv.port}' for ip in ips) if ips else f'port {self.srv.port}'
             t = f'●  Serving at {where}'
             t += f'   ·   {plural(len(tvs), "TV")} connected' if tvs else '   ·   waiting for a TV'
@@ -998,6 +998,21 @@ def settle_instance(check=None, hand=None, wait=None, tries=3):
     return who
 
 
+def offer_autostart(lib, installed):
+    """The installed PLAY's first start for this user turns on "Start with Windows", so the TVs can always reach it.
+    Once only: a portable or zip trial before doesn't use it up, an upgrade from a build that had no such flag
+    counts as offered (it keeps what the user chose), and a settings file PLAY can't write is left alone (it would
+    turn it back on at every start). Returns True if it turned it on."""
+    if not installed or lib.data['autostart_offered'] or lib.read_only:
+        return False
+    try:
+        set_autostart(True)
+    except OSError:
+        return False
+    lib.set_value('autostart_offered', True)
+    return True
+
+
 def other_session_notice(argv, session=None):
     """Another Windows user (or a scheduled task) already runs PLAY. Say so only when someone launched this copy
     by hand; at sign-in (--tray) or in session 0 there is no one to read it, and a box nobody closes would keep
@@ -1057,14 +1072,7 @@ def main(argv=None):
     apply_skin(app, lib.data['skin'])
     srv = server.PlayServer(lib, port=lib.data['port'], accent=lambda: skins.accent(lib.data['skin']))
     srv.start()
-    if not lib.data['autostart_offered'] and installed_copy():
-        # the installed PLAY's first start for this user (a portable or zip trial run before doesn't count):
-        # start with Windows, so the TVs can always reach it. Settings switches it off for good.
-        try:
-            set_autostart(True)
-            lib.set_value('autostart_offered', True)
-        except OSError:
-            pass
+    offer_autostart(lib, installed_copy())
     scanner = Scanner(lib)
     w = Window(lib, srv, scanner)
     tray = QSystemTrayIcon(app)

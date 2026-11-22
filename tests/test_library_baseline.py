@@ -443,4 +443,68 @@ def test_unreachable_lists_offline_links(tmp_path):
     lb.items(0)
     os.rename(str(films), str(tmp_path / 'gone'))
     lb.scan()
-    assert any('otherdrive' in u.lower() for u in lb.unreachable)
+    assert any(u.lower().endswith('more') for u in lb.unreachable)      # named by the link in the media folder
+
+
+# ------------------------------------------------------------------ 6b46edd review
+def test_names_come_from_the_media_folder_through_links(tmp_path):
+    other = tmp_path / 'OtherDrive'
+    make(str(other / 'Breaking Bad' / 'Season 1'), 'E01.mkv', b'breaking bad 1' * 100)
+    make(str(other / 'Season 4'), 'E02.mkv', b'lost 4x2' * 100)
+    root = tmp_path / 'Media'
+    make(str(root / 'Lost' / 'Season 1'), 'E01.mkv', b'lost 1x1' * 100)
+    _junction(root / 'BB', other / 'Breaking Bad')
+    _junction(root / 'Lost' / 'Season 4', other / 'Season 4')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    shows = {(i['show'], i['season']) for i in lb.items(0) if i['kind'] == 'episode'}
+    assert shows == {('BB', 1), ('Lost', 1), ('Lost', 4)}
+    assert all(str(root) in i['path'] for i in lb.current())          # paths as named in the media folder
+
+
+def test_names_starting_with_a_dot_are_kept(tmp_path):
+    make(str(tmp_path / 'm'), '...And Justice for All (1979).mkv')
+    make(str(tmp_path / 'm'), '.hack Sign S01E01.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    titles = sorted(i['title'] for i in lb.items(0))
+    assert len(titles) == 2 and any('Justice' in t for t in titles)
+
+
+def test_a_kids_folder_link_wins_over_a_shared_target(tmp_path):
+    films = tmp_path / 'E' / 'Films'
+    make(str(films / 'Kids'), 'Toy Shelf.mp4')
+    make(str(films), 'Heat 1995.mkv')
+    movies, kids = tmp_path / 'Movies', tmp_path / 'Kids'
+    movies.mkdir()
+    kids.mkdir()
+    _junction(movies / 'All', films)
+    _junction(kids / 'Cartoons', films / 'Kids')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(movies)}, {'path': str(kids), 'kids': True}])
+    ts = next(i for i in lb.items(0) if i['title'] == 'Toy Shelf')
+    assert ts['kids'] and not ts.get('copies')
+    assert [m['title'] for m in lb.tv_view(kids=True)['movies']] == ['Toy Shelf']
+
+
+def test_an_unlistable_subfolder_isnt_reported_as_offline(tmp_path, monkeypatch):
+    make(str(tmp_path / 'm' / 'System Volume Information'), 'x.mkv')
+    make(str(tmp_path / 'm' / 'Locked'), 'y.mkv')
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv')
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith('Locked'):
+            raise PermissionError('denied')
+        return real(p)
+    monkeypatch.setattr(library.os, 'scandir', scandir)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    assert [i['title'] for i in lb.items(0)] == ['Heat'] and lb.unreachable == []
+
+
+def test_an_upgraded_store_counts_autostart_as_offered(tmp_path):
+    (tmp_path / 'library.json').write_text(json.dumps({'folders': []}), encoding='utf-8')
+    assert library.Library(str(tmp_path)).data['autostart_offered'] is True
+    fresh = tmp_path / 'new'
+    assert library.Library(str(fresh)).data['autostart_offered'] is False
