@@ -148,7 +148,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not m:
                 return self.send_error(404)
             self._stream(m.group(1), head)
-        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
             pass                       # the Roku drops connections whenever it seeks
 
     def _stream(self, fp, head):

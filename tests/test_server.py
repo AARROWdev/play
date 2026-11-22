@@ -144,7 +144,7 @@ def test_made_up_ids_dont_cause_scans(srv, monkeypatch):
     assert calls == []
 
 
-def test_unopenable_known_file_rescans_at_most_once_per_10s(srv, monkeypatch):
+def test_unopenable_known_file_rescans_at_most_once_per_2s(srv, monkeypatch):
     it = jp(srv)
     srv.lib.scan()
     calls = []
