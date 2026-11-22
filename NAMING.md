@@ -50,6 +50,12 @@ Ann Droid/
 ```
 
 - Spell the show name the same way on every episode. Capital letters don't matter.
+- Two different shows with the same name (a remake) stay apart when you add the year: `Doctor Who (1963) S01E01.mkv`
+  and `Doctor Who (2005) S01E01.mkv`, or folders `Doctor Who (1963)/Season 1/`.
+- A `Specials` folder is season 0, and `Season 1 (2019)` works as a season folder.
+- A file with two episodes in it, `Show S01E01-E02.mkv`, counts as both.
+- A name PLAY can't read as an episode but that looks like one (`Show E03.mkv`, `Show Season 1 Ep 6.mkv`) is listed
+  under **Needs a look** with how to fix it.
 - PLAY tells you when a season is missing an episode ("Season 1 is missing episode 3") or has one twice. Look under
   **Needs a look** in the PLAY window.
 

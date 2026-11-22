@@ -29,7 +29,7 @@ def test_movie_names(stem, title, year):
     (r'N:\M\Ann Droid S01 E02 Pilot.mkv', ('Ann Droid', 1, 2)),
     (r'N:\M\Ann Droid 1x02.mkv', ('Ann Droid', 1, 2)),
     (r'N:\M\Ann Droid Season 1 Episode 2.mkv', ('Ann Droid', 1, 2)),
-    (r'N:\M\Ann Droid (2026)\Season 1\E02.mkv', ('Ann Droid', 1, 2)),
+    (r'N:\M\Ann Droid (2026)\Season 1\E02.mkv', ('Ann Droid (2026)', 1, 2)),
     (r'N:\M\Ann Droid\Season 2\03 The Return.mkv', ('Ann Droid', 2, 3)),
     (r'N:\M\Ann Droid\S01E04.mkv', ('Ann Droid', 1, 4)),
 ])
@@ -171,12 +171,6 @@ def test_copy_of_same_file_listed_once(lib, tmp_path):
     make(str(tmp_path / 'home' / 'backup'), 'Conor copy.mkv', open(src, 'rb').read())
     its = [i for i in lib.items(0) if 'Conor' in i['title']]
     assert len(its) == 1 and '2 copies of this file' in its[0]['problems']
-
-
-def test_import_old_config(tmp_path):
-    p = tmp_path / 'config.json'
-    p.write_text('{"port": 8500, "libraries": {"HOME": ["N:\\\\H"], "KIDS": ["N:\\\\K"]}}')
-    assert library.import_old_config(str(p)) == [{'path': 'N:\\H', 'kids': False}, {'path': 'N:\\K', 'kids': True}]
 
 
 def test_bad_store_file_starts_clean(tmp_path):

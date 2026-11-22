@@ -242,13 +242,14 @@ def test_a_real_change_still_refreshes(win, tmp_path):
     assert win.lib.version == v + 1
 
 
-def test_multi_select_edit_scans_once(win, monkeypatch):
+def test_multi_select_edit_never_walks_the_disk(win, monkeypatch):
     pick(win, 'Conor', 'Clip', 'Jungle World')
     calls = []
     real = win.lib.scan
     monkeypatch.setattr(win.lib, 'scan', lambda: calls.append(1) or real())
     win.d_kids.click()
-    assert len(calls) == 1
+    assert calls == []                         # an edit rebuilds from memory: no disk walk at all
+    assert all(i['kids'] for i in win.lib.current() if i['title'] in ('Conor', 'Clip', 'Jungle World'))
 
 
 def test_busy_port_keeps_the_working_server(win, monkeypatch):

@@ -1,7 +1,8 @@
 """PLAY skins: the same five as Cratedig. Each sets the accent and the dark surfaces; suite_style applies them."""
+import suite_style
+
 SKINS = {
-    "Blue": dict(accent="#2f9bff", light="#7cc4ff", lighter="#d6efff", bg="#111419", base="#13161c",
-                 alt="#181c23", mid="#1f242c", bar="#171b22", line="#2a3039", sel="#24405e"),
+    "Blue": dict(suite_style.BLUE),          # the suite default, from the shared file
     "Ember": dict(accent="#ff8a1f", light="#ffc34d", lighter="#fff3c4", bg="#141518", base="#16171a",
                   alt="#1c1d21", mid="#24262b", bar="#1b1c20", line="#2e3036", sel="#4a3424"),
     "Neon": dict(accent="#2bff88", light="#9dffc9", lighter="#e6fff1", bg="#0f1412", base="#111613",
