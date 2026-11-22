@@ -216,7 +216,8 @@ def test_discovery_survives_stray_packets(srv):
     assert d['name'] == 'PLAY'
 
 
-def test_discovery_loop_continues_after_an_error(srv, monkeypatch):
+def test_discovery_loop_continues_after_an_error(monkeypatch):
+    s = server.PlayServer(lib=None)                # never started: no sockets to leak
     results = iter([False, False, True])
     calls = []
 
@@ -224,12 +225,13 @@ def test_discovery_loop_continues_after_an_error(srv, monkeypatch):
         calls.append(1)
         r = next(results, None)
         if r is None:
-            srv.udp = None                         # stop the loop
+            s.udp = None                           # stop the loop
             return True
         return r
-    monkeypatch.setattr(srv, '_discovery_once', once)
-    srv.udp = 'sock'
-    srv._discovery()
+    monkeypatch.setattr(s, '_discovery_once', once)
+    monkeypatch.setattr(server.time, 'sleep', lambda t: None)
+    s.udp = 'sock'
+    s._discovery()
     assert len(calls) == 4
 
 
@@ -239,9 +241,9 @@ def test_discovery_port_in_use_is_reported(srv):
     other.stop()
 
 
-def test_info_has_the_pcs_address(srv):
+def test_info_is_cheap_and_has_no_address_list(srv):
     d = json.loads(get(srv, '/api/info')[1])
-    assert d['ips'] == server.lan_ips() and all(server.ipaddress.ip_address(ip).is_private for ip in d['ips'])
+    assert d['name'] == 'PLAY' and 'ips' not in d                  # the window shows the address; the TV knows it
 
 
 def test_cut_short_response_closes_the_connection(srv, monkeypatch):
@@ -321,3 +323,27 @@ def test_lan_ips_are_private_and_not_tailscale():
     for ip in server.lan_ips():
         a = ipaddress.ip_address(ip)
         assert a.is_private and a not in ipaddress.ip_network('100.64.0.0/10')
+
+
+
+def test_refused_list_is_capped_and_latest_last(srv):
+    for n in range(30):
+        srv.refuse(f'host{n}.example')
+    hosts = srv.refused_hosts()
+    assert len(hosts) == 20 and hosts[-1] == 'host29.example'
+
+
+def test_lan_ips_cached(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, '_find_lan_ips', lambda: calls.append(1) or ['10.0.0.2'])
+    monkeypatch.setattr(server, '_ips_cache', (0.0, []))
+    server.lan_ips()
+    server.lan_ips()
+    assert calls == [1]
+
+
+def test_home_192_168_first(monkeypatch):
+    monkeypatch.setattr(server, '_default_route_ip', lambda: '10.8.0.6')            # a full-tunnel VPN
+    monkeypatch.setattr(server.socket, 'getaddrinfo', lambda *a: [(0, 0, 0, '', (ip, 0))
+                                                                    for ip in ('10.8.0.6', '192.168.1.20')])
+    assert server._find_lan_ips()[0] == '192.168.1.20'

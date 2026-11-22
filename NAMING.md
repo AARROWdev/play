@@ -53,7 +53,8 @@ Ann Droid/
 - Two different shows with the same name (a remake) stay apart when you add the year: `Doctor Who (1963) S01E01.mkv`
   and `Doctor Who (2005) S01E01.mkv`, or folders `Doctor Who (1963)/Season 1/` (the folder's year counts even when
   the file names leave it out).
-- A `Specials` folder is season 0, and `Season 1 (2019)` works as a season folder.
+- A `Specials` folder is season 0 for files named like `S00E01` or `E01` (a plain `01 Interview.mkv` there stays a
+  movie), and `Season 1 (2019)` or `Season 01 [1080p]` work as season folders.
 - A file with two episodes in it, `Show S01E01-E02.mkv`, counts as both.
 - A name PLAY can't read as an episode but that looks like one (`Show E03.mkv`, `Show Season 1 Ep 6.mkv`) is listed
   under **Needs a look** with how to fix it.

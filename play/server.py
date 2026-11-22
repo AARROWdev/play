@@ -1,6 +1,6 @@
 """The movie server the Roku app talks to, plus LAN discovery so the TV finds this PC by itself.
 
-    GET  /api/info              -> {"name": "PLAY", "pc": <computer name>, "ips": [LAN addresses], "version", "accent"}
+    GET  /api/info              -> {"name": "PLAY", "pc": <computer name>, "version", "accent"}
     GET  /api/tv?side=home|kids -> the movies (collections as single entries) and shows for that side of the TV app;
                                    503 {"busy": "reading"} while PLAY reads the folders for the first time
     GET  /media/<id>            -> the file, with HTTP Range support (the Roku seeks with Range requests)
@@ -40,9 +40,24 @@ class _HTTP(ThreadingHTTPServer):
         super().server_bind()
 
 
-def lan_ips():
-    """This PC's home-network addresses (what a TV would type), best first: private IPv4 only, so a VPN or
-    Tailscale address (100.64.0.0/10, public ranges) isn't offered. 192.168.x.x comes first, as home routers use it."""
+_ips_cache = (0.0, [])
+
+
+def lan_ips(max_age=30.0):
+    """This PC's private IPv4 addresses (what a TV would type), most likely first. A Tailscale/CGNAT address
+    (100.64.0.0/10) is never offered. A VPN's private address can't be told from the home network's by its number,
+    so the window shows the first two: home routers mostly use 192.168.x.x, and that comes first. Cached for 30 s:
+    the window asks every 1.5 s."""
+    global _ips_cache
+    t, ips = _ips_cache
+    if time.monotonic() - t < max_age and t:
+        return list(ips)
+    ips = _find_lan_ips()
+    _ips_cache = (time.monotonic(), ips)
+    return list(ips)
+
+
+def _find_lan_ips():
     found = set()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
@@ -54,8 +69,8 @@ def lan_ips():
         a = ipaddress.ip_address(ip)
         if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
             ips.append(ip)
-    primary = _default_route_ip()                     # the adapter the PC uses to go out: the home network
-    return sorted(ips, key=lambda ip: (ip != primary, not ip.startswith('192.168.'), ip.startswith('172.'),
+    primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
+    return sorted(ips, key=lambda ip: (not ip.startswith('192.168.'), ip != primary, ip.startswith('172.'),
                                        ipaddress.ip_address(ip)))
 
 
@@ -109,6 +124,7 @@ class PlayServer:
         self.accent = accent or (lambda: library.skins.accent())
         self.clients = {}            # ip -> last request time, for "TVs connected"
         self.refused = {}            # Host -> last time a request with it was turned away (shown in the window)
+        self.refused_max = 20
         self._clients_lock = threading.Lock()
         self.httpd = None
         self.udp = None
@@ -167,16 +183,25 @@ class PlayServer:
         with self._clients_lock:
             return sorted(ip for ip, t in self.clients.items() if now - t < within)
 
+    def refuse(self, host):
+        """Remember a refused Host (printable characters only, short), keeping the 20 most recent."""
+        h = ''.join(c for c in str(host) if c.isprintable())[:100]
+        with self._clients_lock:
+            self.refused[h] = time.monotonic()
+            while len(self.refused) > self.refused_max:
+                del self.refused[min(self.refused, key=self.refused.get)]
+
     def refused_hosts(self, within=600):
+        """Refused Host names seen in the last 10 minutes, most recent last."""
         now = time.monotonic()
         with self._clients_lock:
-            return sorted(h for h, t in self.refused.items() if now - t < within)
+            return [h for h, t in sorted(self.refused.items(), key=lambda kv: kv[1]) if now - t < within]
 
     def _discovery(self):
         u = self.udp
         while self.udp is u:
-            if not self._discovery_once(u) and self.udp is not u:
-                return
+            if not self._discovery_once(u):
+                time.sleep(0.05)                     # an error that keeps coming mustn't spin a core
 
     def _discovery_once(self, u):
         """Answer one packet. False after an error: a stray packet (a reset left by a TV that already went away) is
@@ -221,14 +246,13 @@ class _Handler(BaseHTTPRequestHandler):
         srv = self.srv
         host = self.headers.get('Host')
         if not host_allowed(host):
-            with srv._clients_lock:                 # the window says a TV was turned away, and by which name
-                srv.refused[str(host)[:100]] = time.monotonic()
+            srv.refuse(host)                         # the window says a TV was turned away, and by which name
             return self.send_error(403, 'Use the PC\'s IP address')
         srv.seen(self.client_address[0])
         u = urlparse(self.path)
         try:
             if u.path == '/api/info':
-                return self._json({'name': 'PLAY', 'pc': socket.gethostname(), 'ips': lan_ips(), 'version': VERSION,
+                return self._json({'name': 'PLAY', 'pc': socket.gethostname(), 'version': VERSION,
                                    'accent': srv.accent()}, head)
             if u.path == '/api/tv':
                 if not srv.lib._scanned:            # the first read of the folders: say so now, never make the TV wait

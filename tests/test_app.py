@@ -29,6 +29,8 @@ def win(qapp, tmp_path, monkeypatch):
     lib.set_folders([{'path': str(home)}, {'path': str(kids), 'kids': True}])
     srv = server.PlayServer(lib, port=0, discovery_port=0)
     srv.start()
+    lib.data['port'] = srv.port            # as in the app: the saved port is the one being served
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: None)   # a test never waits on a modal
     lib.scan()
     w = pa.Window(lib, srv, pa.Scanner(lib))
     w.timer.stop()
@@ -275,7 +277,6 @@ def test_multi_select_edit_never_walks_the_disk(win, monkeypatch):
 
 
 def test_busy_port_keeps_the_working_server(win, monkeypatch):
-    import socket
     blocker = socket.socket()
     blocker.bind(('0.0.0.0', 0))
     blocker.listen()
@@ -447,14 +448,12 @@ def test_mixed_selection_lights_neither_kind(win):
 
 
 def test_dialogs_and_menus_are_deleted(win, monkeypatch):
-    from PySide6.QtWidgets import QDialog as D
     ids = [i['id'] for i in win.lib.current() if i['title'].startswith('Jungle')]
     cid = win.lib.make_collection('JP', ids)
-    monkeypatch.setattr(pa.CollectionDialog, 'exec', lambda self: D.Rejected)
+    monkeypatch.setattr(pa.CollectionDialog, 'exec', lambda self: QDialog.Rejected)
     before = len(win.findChildren(pa.CollectionDialog))
     for _ in range(5):
         win._edit_collection(cid)
-    qapp = QApplication.instance()
     from PySide6.QtCore import QCoreApplication, QEvent
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     assert len(win.findChildren(pa.CollectionDialog)) == before
@@ -608,13 +607,13 @@ def test_not_ready_guards(qapp, tmp_path, monkeypatch):
 
 def test_restart_button_uses_the_typed_port(win, monkeypatch):
     got = []
-    monkeypatch.setattr(win, 'restart_server', lambda port=None: got.append(port))
+    monkeypatch.setattr(win, 'restart_server', lambda port=None, save=True: got.append((port, save)))
     d = pa.SettingsDialog(win, win.lib)
     d.port.setValue(18999)
     btn = next(b for b in d.findChildren(pa.QPushButton) if b.text() == 'Restart server')
     btn.click()
     d.deleteLater()
-    assert got == [18999]
+    assert got == [(18999, False)]                 # tried, not saved: Save or Cancel decides
 
 
 def test_autostart_written_only_when_changed(win, monkeypatch):
@@ -670,3 +669,70 @@ def test_hand_over_reaches_the_listener(qapp, monkeypatch):
 def test_hand_over_gives_up_when_nobody_listens(monkeypatch):
     monkeypatch.setattr(pa, 'INSTANCE_KEY', 'PLAY-test-' + __import__('uuid').uuid4().hex)
     assert pa.hand_over(timeout=0.5) is False
+
+
+
+# ------------------------------------------------------------------ b6eeb8b review
+def test_close_notice_and_tray_use_the_skin_icon(win, monkeypatch):
+    class Tray:
+        icon = msg_icon = None
+
+        def setIcon(self, i):
+            self.icon = i
+
+        def showMessage(self, title, text, icon, ms):
+            self.msg_icon = icon
+    made = []
+    monkeypatch.setattr(pa, 'play_icon', lambda accent=None, size=256: made.append(accent) or pa.QIcon())
+    monkeypatch.setattr(pa.QSystemTrayIcon, 'isSystemTrayAvailable', staticmethod(lambda: True))
+    win.lib.set_value('skin', 'Neon')
+    win.tray = Tray()
+    win.set_icons()
+    assert win.tray.icon is not None and made[-1] == skins.get('Neon')['accent']
+    made.clear()
+    win.show()
+    win.close()
+    assert win.tray.msg_icon is not None and made == [skins.get('Neon')['accent']]
+
+
+def test_settle_instance_starts_when_the_old_copy_is_gone():
+    answers = iter([pa.instance.SAME_SESSION, pa.instance.NONE])
+    waits = []
+    who = pa.settle_instance(check=lambda: next(answers), hand=lambda: False, wait=waits.append)
+    assert who == pa.instance.NONE and waits == [1]
+
+
+def test_settle_instance_hands_over_when_answered():
+    who = pa.settle_instance(check=lambda: pa.instance.SAME_SESSION, hand=lambda: True, wait=lambda s: None)
+    assert who == pa.instance.SAME_SESSION
+
+
+def test_only_the_installed_copy_adds_itself_to_sign_in(monkeypatch):
+    monkeypatch.setenv('ProgramFiles', r'C:\Program Files')
+    monkeypatch.setenv('ProgramW6432', r'C:\Program Files')
+    assert pa.installed_copy(r'C:\Program Files\PLAY\PLAY.exe')
+    assert not pa.installed_copy(r'C:\Users\me\AppData\Local\Temp\Temp1_PLAY.zip\PLAY\PLAY.exe')
+    assert not pa.installed_copy(r'D:\Portable\PLAY\PLAY.exe')
+
+
+def test_refused_host_is_shown_as_plain_text(win):
+    win.srv.refuse('<b>PLAY update required</b>')
+    win._status()
+    assert win.status.textFormat() == pa.Qt.PlainText
+    assert '<b>' not in win.status.toolTip() and '&lt;b&gt;' in win.status.toolTip()
+
+
+def test_restart_button_then_cancel_goes_back(win, monkeypatch):
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: None)
+    win.lib.data['port'] = win.srv.port
+    saved = win.srv.port
+    trial = free_port()
+
+    def try_then_cancel(d):
+        d.port.setValue(trial)
+        next(b for b in d.findChildren(pa.QPushButton) if b.text() == 'Restart server').click()
+        assert win.srv.port == trial and win.lib.data['port'] == saved      # tried, not saved
+        return QDialog.Rejected
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', try_then_cancel)
+    win.open_settings()
+    assert win.srv.port == saved and win.srv.running

@@ -56,10 +56,27 @@ def test_guide_tables_say_what_the_code_does():
         want = want.strip()
         stem = os.path.splitext(fname)[0]
         ep = names.episode(os.path.join(r'N:\M', fname), r'N:\M')
-        if ' · ' in want and want.count(' · ') == 2:           # Show · Season · Episode
+        if want.count(' · ') == 2:                              # Show · Season · Episode
             show, s, e = want.split(' · ')
             assert ep == (show, int(s), int(e)), fname
         else:                                                   # Title · Year, or Title (no year)
             title, _, year = want.partition(' · ')
             title = title.split(' (no year)')[0].strip()
             assert ep is None and names.movie(stem) == (title, int(year) if year else None), fname
+
+
+
+@pytest.mark.parametrize('rel,want', [
+    # examples written in the guide's text, not its tables
+    (r'Ann Droid\Specials\E01.mkv', ('Ann Droid', 0, 1)),
+    (r'Doctor Who (1963)\Season 1\Doctor Who S01E01.mkv', ('Doctor Who (1963)', 1, 1)),
+    (r'Ann Droid\Season 1 (2019)\E02.mkv', ('Ann Droid', 1, 2)),
+    (r'Ann Droid\Season 01 [1080p]\E02.mkv', ('Ann Droid', 1, 2)),
+])
+def test_prose_examples(rel, want):
+    assert names.episode(os.path.join(r'N:\M', rel), r'N:\M') == want
+
+
+def test_prose_examples_that_stay_movies():
+    assert names.episode(r'N:\M\Show\Specials\01 Interview.mkv', r'N:\M') is None
+    assert names.movie('Death Race 2000 (1975)') == ('Death Race 2000', 1975)

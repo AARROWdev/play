@@ -29,7 +29,7 @@ SETTLE = 10.0       # a new file must look the same for this long (by this PC's 
 STARTUP_AGE = 60.0  # at startup, files last written more than a minute ago are taken at once
 STOP_WORDS = {'the', 'and', 'of', 'a', 'an', 'movies', 'movie', 'films', 'film', 'collection', 'series', 'set',
               'box', 'complete', 'best', 'all'}
-_OLD_EP_TITLE = re.compile(r'^.+ S\d{2}E\d{2}$')
+_OLD_EP_TITLE = re.compile(r'^.+ S\d{2}E\d{2,3}$')
 
 
 def default_store_dir():
@@ -183,6 +183,8 @@ class Library:
         self.cache_path = os.path.join(self.dir, 'fingerprints.json')
         self.lock = threading.RLock()          # guards data and items; held only for in-memory work
         self._scan_lock = threading.Lock()     # one disk walk at a time; taken before lock, never inside it
+        self._write_lock = threading.Lock()    # one settings write at a time (taken without lock held)
+        self._save_seq = self._saved_seq = 0
         self.fresh = not os.path.exists(self.path) and not os.path.exists(self.path + '.bak')   # a first start
         d, self.load_problem, self.read_only = load_store(self.path)
         folders, seen = [], set()
@@ -238,11 +240,25 @@ class Library:
     # ------------------------------------------------------------------ settings
     def save(self):
         """Write library.json, then copy it to library.json.bak, so the backup is always the last good save (and a
-        broken file is never copied over it). Read-only after a load that couldn't open the file: no writes."""
+        broken file is never copied over it). Read-only after a load that couldn't open the file: no writes.
+        The settings are copied under the lock; the disk write happens after it (callers save after their lock
+        block), so the server and the window never wait on it. Writes are serialised, and an older snapshot never
+        lands after a newer one."""
         if self.read_only:
             return
         with self.lock:
-            _write_json(self.path, self.data)
+            blob = json.dumps(self.data, indent=1, ensure_ascii=True)
+            self._save_seq += 1
+            seq = self._save_seq
+        with self._write_lock:
+            if seq < self._saved_seq:
+                return
+            self._saved_seq = seq
+            os.makedirs(self.dir, exist_ok=True)
+            tmp = self.path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(blob)
+            os.replace(tmp, self.path)
             try:
                 shutil.copy2(self.path, self.path + '.bak')
             except OSError:
@@ -266,9 +282,9 @@ class Library:
                     out.append({'path': p, 'kids': f.get('kids') is True})
             changed = out != self.data['folders']
             self.data['folders'] = out
-            self.save()
             if changed:
                 self._rebuild()                      # a removed folder's titles go at once
+        self.save()
 
     def set_value(self, key, value):
         if key == 'port' and not valid_port(value):
@@ -277,7 +293,7 @@ class Library:
             raise ValueError(f'skin cannot be {value!r}')
         with self.lock:
             self.data[key] = value
-            self.save()
+        self.save()
 
     # ------------------------------------------------------------------ scanning (disk)
     def scan(self, after_gen=None):
@@ -297,7 +313,8 @@ class Library:
             raw, reached, new_pending, dirty, errored = {}, set(), {}, False, []
             for f, root in zip(folders, roots):
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
-                files, ok, changed, errs = _walk(f['path'], others, cache, pending, new_pending, first)
+                files, ok, changed, errs = _walk(f['path'], others, cache, pending, new_pending, first,
+                                                 [g['path'] for g in folders])
                 dirty = dirty or changed
                 if ok:
                     # a subfolder that couldn't be listed keeps what it had: its titles don't vanish
@@ -454,7 +471,7 @@ class Library:
         for k in OVERRIDABLE:
             if k in ov and valid(k, ov[k]):       # a bad hand-edited value is ignored, not fatal
                 it[k] = ov[k]
-        if 'episode' in ov or 'season' in ov:     # renumbered: the file name's second episode no longer applies
+        if 'episode' in ov:                       # renumbered: the file name's second episode no longer applies
             it['episode_last'] = None
         if it['kind'] == 'episode' and not (it.get('show') and isinstance(it.get('season'), int)
                                              and isinstance(it.get('episode'), int)):
@@ -489,8 +506,8 @@ class Library:
         with self.lock:
             for fp in fps:
                 self._override(fp, fields)
-            self.save()
             self._rebuild()
+        self.save()
 
     def _override(self, fp, fields):
         cur = self._by_id.get(fp)
@@ -500,9 +517,7 @@ class Library:
                 v = v.strip()
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
-            keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur['auto'].get('kind') == 'movie'
-                                                                            and names.looks_like_episode(
-                                                                                os.path.splitext(cur['file'])[0]))
+            keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('near_miss'))
             if cur is not None and cur['auto'].get(k) == v and not keep:
                 ov.pop(k, None)
             else:
@@ -521,9 +536,9 @@ class Library:
             self._take(members)
             self.data['collections'][cid] = {'name': name.strip() or 'Collection', 'order': order,
                                              'members': list(dict.fromkeys(members))}
-            self.save()
             self._rebuild()
-            return cid
+        self.save()
+        return cid
 
     def update_collection(self, cid, name=None, order=None, members=None, shown=None):
         """members, when given, is the new order of the films the dialog showed (shown: the ids it listed when it
@@ -549,23 +564,23 @@ class Library:
                 c['members'] = list(dict.fromkeys(new))
             if not c['members']:
                 del self.data['collections'][cid]
-            self.save()
             self._rebuild()
+        self.save()
 
     def remove_from_collections(self, fps):
         """Take these titles out of whatever collection they are in (one save, one rebuild)."""
         self._ensure_scanned()
         with self.lock:
             self._take(set(fps))
-            self.save()
             self._rebuild()
+        self.save()
 
     def delete_collection(self, cid):
         self._ensure_scanned()
         with self.lock:
             self.data['collections'].pop(cid, None)
-            self.save()
             self._rebuild()
+        self.save()
 
     def _take(self, members, keep=None):
         """A movie is in one collection at a time: remove these members from any other collection."""
@@ -579,10 +594,11 @@ class Library:
 
     def dismiss(self, key):
         with self.lock:
-            if key not in self.data['dismissed']:
-                self.data['dismissed'].append(key)
-                self.save()
-                self._rebuild()
+            if key in self.data['dismissed']:
+                return
+            self.data['dismissed'].append(key)
+            self._rebuild()
+        self.save()
 
     # ------------------------------------------------------------------ derived views
     def _members_locked(self, cid):
@@ -686,7 +702,7 @@ def _is_junction(entry):
         return bool(getattr(entry.stat(follow_symlinks=False), 'st_reparse_tag', 0))
 
 
-def _walk(root, skip_roots, cache, pending, new_pending, first):
+def _walk(root, skip_roots, cache, pending, new_pending, first, all_roots=()):
     """One media folder. Returns ([(fp, path, ext, size)], could the folder be listed, did the cache change,
     [normcased subfolders that couldn't be listed]).
     Folders that are their own media folder (skip_roots) are left to their own walk. Junctions, mount points and
@@ -700,7 +716,9 @@ def _walk(root, skip_roots, cache, pending, new_pending, first):
             return [], False, False, []
     except OSError:
         return [], False, False, []
-    visited = {(st.st_dev, st.st_ino)}
+    # where links may not lead: into this media folder or any other one (each is walked on its own)
+    walked = {os.path.normcase(os.path.realpath(r)) for r in (root, *all_roots)}
+    followed = set()
     now_mono, now = time.monotonic(), time.time()
     stack = [root]
     while stack:
@@ -721,12 +739,18 @@ def _walk(root, skip_roots, cache, pending, new_pending, first):
                         continue
                     if os.path.normcase(e.path) in skip_roots:
                         continue
-                    if e.is_symlink() or _is_junction(e):      # only these can loop: check where they lead
-                        t = os.stat(e.path)
-                        ident = (t.st_dev, t.st_ino)
-                        if ident in visited:
+                    if e.is_symlink() or _is_junction(e):
+                        # a junction, mount point or link: follow it unless it leads into a folder that is walked
+                        # anyway (this media folder or another), or somewhere already followed
+                        try:
+                            os.stat(e.path)                       # an unplugged target: keep what it had
+                        except OSError:
+                            errors.append(os.path.normcase(e.path))
                             continue
-                        visited.add(ident)
+                        real = os.path.normcase(os.path.realpath(e.path))
+                        if _under(real, walked) or real in followed:
+                            continue
+                        followed.add(real)
                     subdirs.append(e.path)
                     continue
             except OSError:
@@ -806,5 +830,5 @@ def _mark_problems(items):
         missing = [n for n in range(1, have[-1] + 1) if n not in nums]
         if missing:
             last = max(group, key=lambda i: i['episode'])
-            last['problems'].append(f'{_season_name(season)} is missing '
-                                    f'{"episode" if len(missing) == 1 else "episodes"} {", ".join(map(str, missing))}')
+            word = names.plural(len(missing), 'episode').split(' ', 1)[1]
+            last['problems'].append(f'{_season_name(season)} is missing {word} {", ".join(map(str, missing))}')

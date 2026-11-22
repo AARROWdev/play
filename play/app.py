@@ -77,6 +77,18 @@ def launch_command():
     return f'"{pyw}" "{main}" --tray'
 
 
+def installed_copy(exe=None):
+    """Is this the installed PLAY (under Program Files)? A portable copy, an exe opened straight from a zip (Windows
+    runs it from a temp folder it later deletes) or a source run never adds itself to sign-in."""
+    if exe is None:
+        if not getattr(sys, 'frozen', False):
+            return False
+        exe = sys.executable
+    exe = os.path.normcase(os.path.abspath(exe))
+    roots = [os.environ.get(k) for k in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)')]
+    return any(r and exe.startswith(os.path.normcase(os.path.abspath(r)) + os.sep) for r in roots)
+
+
 def get_autostart():
     """True only if the Run entry starts this copy of PLAY (not an old or moved install)."""
     import winreg
@@ -180,7 +192,7 @@ class SettingsDialog(QDialog):
         restart = QPushButton('Restart server')
         restart.setObjectName('chip')
         restart.setToolTip('Stop and start the movie server, e.g. after the network changed')
-        restart.clicked.connect(lambda: parent.restart_server(self.port.value()))
+        restart.clicked.connect(lambda: parent.restart_server(self.port.value(), save=False))
         row2.addWidget(restart)
         row2.addStretch()
         v.addLayout(row2)
@@ -310,6 +322,7 @@ class Window(QMainWindow):
         split.setCollapsible(1, False)
         self.setCentralWidget(split)
         self.status = QLabel()
+        self.status.setTextFormat(Qt.PlainText)      # parts of it come from the network (a refused Host name)
         self.statusBar().addWidget(self.status, 1)
         self.status_note = QLabel('Files are never renamed or moved')
         self.statusBar().addPermanentWidget(self.status_note)
@@ -480,8 +493,8 @@ class Window(QMainWindow):
     def _status(self):
         if self.srv.running:
             tvs = self.srv.tvs()
-            ip = server.lan_ip()
-            where = f'{ip}:{self.srv.port}' if ip else f'port {self.srv.port}'
+            ips = server.lan_ips()[:2]
+            where = ' or '.join(f'{ip}:{self.srv.port}' for ip in ips) if ips else f'port {self.srv.port}'
             t = f'●  Serving at {where}'
             t += f'   ·   {plural(len(tvs), "TV")} connected' if tvs else '   ·   waiting for a TV'
         else:
@@ -498,7 +511,7 @@ class Window(QMainWindow):
             notes.append('Settings are not being saved (see the warning at start)')
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
         text = f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes)
-        self.status.setToolTip(text.replace('   ·   ', '\n'))
+        self.status.setToolTip(html.escape(text, quote=False).replace('   ·   ', '<br>'))   # escaped: never read as markup
         # the full text is in the tooltip; the bar shows what fits
         room = self.width() - self.status_note.sizeHint().width() - 40     # the bar's width, less the fixed note
         self.status.setText(self.status.fontMetrics().elidedText(text, Qt.ElideRight, max(200, room)))
@@ -855,6 +868,8 @@ class Window(QMainWindow):
     def open_settings(self, first_run=False):
         d = SettingsDialog(self, self.lib, first_run)
         accepted = d.exec() == QDialog.Accepted
+        if not accepted and self.srv.port != self.lib.data['port']:
+            self.restart_server()                      # a port tried with "Restart server", then Cancel
         try:
             folders, port, skin, auto = d.values()
             auto_was = d.auto_was
@@ -875,15 +890,15 @@ class Window(QMainWindow):
             self.restart_server(port)
         self.scanner.kick()
 
-    def restart_server(self, port=None):
+    def restart_server(self, port=None, save=True):
         """Restart on `port` (default: the saved one). If that port is busy, go back to the old one and say so;
-        the new port is only saved once it works."""
+        the new port is only saved once it works (and save is True: Settings' button only tries it)."""
         old = self.srv.port
         new = self.lib.data['port'] if port is None else port
         self.srv.stop()
         self.srv.port = new
         ok = self.srv.start()
-        if ok and new != self.lib.data['port']:
+        if ok and save and new != self.lib.data['port']:
             self.lib.set_value('port', new)
         if not ok:
             err = self.srv.error
@@ -965,6 +980,22 @@ def hand_over(timeout=5.0):
     return False
 
 
+def settle_instance(check=None, hand=None, wait=None, tries=3):
+    """instance.check(), and when another copy in this session doesn't answer the hand-over (it was quitting: Quit,
+    then a quick relaunch), check again a second later, so this copy starts once the old one is gone."""
+    import time
+    check = check or instance.check
+    hand = hand or hand_over
+    wait = wait or time.sleep
+    who = check()
+    for _ in range(tries):
+        if who != instance.SAME_SESSION or hand():
+            return who
+        wait(1)
+        who = check()
+    return who
+
+
 def other_session_notice(argv, session=None):
     """Another Windows user (or a scheduled task) already runs PLAY. Say so only when someone launched this copy
     by hand; at sign-in (--tray) or in session 0 there is no one to read it, and a box nobody closes would keep
@@ -1011,9 +1042,8 @@ def main(argv=None):
     # One PLAY per PC. In this session: hand over to the running copy (it shows its window) and exit. For another
     # Windows account: say so and exit. Never a second server. The hand-over listener starts before the first
     # scan, so a launch during a slow startup scan still reaches it.
-    who = instance.check()
+    who = settle_instance()
     if who == instance.SAME_SESSION:
-        hand_over()
         return 0
     if who == instance.OTHER_SESSION:
         other_session_notice(argv)
@@ -1022,18 +1052,17 @@ def main(argv=None):
     # listening starts before the first scan; a hand-over that arrives early is answered once the loop runs
     listener = start_listener(lambda: shown['window'] and shown['window'].bring_up())
     lib = library.Library()
-    t = apply_skin(app, lib.data['skin'])
-    app.setWindowIcon(play_icon(t['accent']))
+    apply_skin(app, lib.data['skin'])
     srv = server.PlayServer(lib, port=lib.data['port'], accent=lambda: skins.accent(lib.data['skin']))
     srv.start()
-    if lib.fresh:                     # a first start: PLAY starts with Windows, so the TVs can always reach it
+    if lib.fresh and installed_copy():   # a first start of the installed PLAY: start with Windows, for the TVs
         try:
             set_autostart(True)
         except OSError:
             pass
     scanner = Scanner(lib)
     w = Window(lib, srv, scanner)
-    tray = QSystemTrayIcon(play_icon(t['accent']), app)
+    tray = QSystemTrayIcon(app)
     tray.setToolTip('PLAY')
     menu = QMenu()
     menu.addAction('Open library', w.bring_up)
@@ -1042,8 +1071,9 @@ def main(argv=None):
     menu.addAction('Quit PLAY', app.quit)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and w.bring_up())
-    tray.show()
     w.tray = tray
+    w.set_icons()
+    tray.show()
     w.listener = listener
     shown['window'] = w
     scanner.kick()

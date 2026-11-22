@@ -33,6 +33,7 @@ end sub
 
 ' ---------------------------------------------------------------- finding the PC
 sub discover()
+    stopRetry()
     m.level = "find"
     hideAll()
     m.header.text = "PLAY"
@@ -193,6 +194,7 @@ sub hideAll()
 end sub
 
 sub showMenu()
+    stopRetry()
     m.level = "menu"
     hideAll()
     m.menu.visible = true
@@ -227,7 +229,17 @@ sub onMenu()
 end sub
 
 ' ---------------------------------------------------------------- loading
+sub stopRetry()
+    if m.retry <> invalid
+        m.retry.control = "stop"
+        m.retry.unobserveField("fire")
+        m.retry = invalid
+    end if
+end sub
+
 sub load()
+    stopRetry()
+    if m.lib = invalid then return            ' left the list while a retry was waiting
     m.level = "loading"
     m.header.text = m.lib
     m.status.text = "Loading…"
@@ -536,7 +548,7 @@ end function
 ' Every 30 s of playback the spot is saved, so Home or switching the TV off still resumes about where it stopped.
 ' While playing, the spot is saved every 30 s, so Home or switching the TV off still resumes about where it stopped.
 sub onPosition()
-    if m.current = invalid or m.video.state <> "playing" then return
+    if m.current = invalid or m.video.state <> "playing" or m.seekTo > 0 then return
     p = Int(m.video.position)
     if p - m.lastSave >= 30 or m.lastSave - p >= 30
         m.lastSave = p
@@ -547,6 +559,7 @@ end sub
 ' keepOnly: only ever write a spot (on an error, a position near 0 must not wipe a good resume point).
 sub savePos(keepOnly = false as boolean)
     if m.current = invalid then return
+    if m.seekTo > 0 then return                ' still loading toward the resume point: the old mark stands
     url = m.current.url
     spot = Int(m.video.position)
     dur = m.video.duration

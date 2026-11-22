@@ -300,3 +300,77 @@ def test_by_id_is_an_index(lib):
 def test_release_key_is_the_one_rule():
     items = [{'title': 'B', 'year': None}, {'title': 'A', 'year': 2001}, {'title': 'C', 'year': 1990}]
     assert [i['title'] for i in sorted(items, key=library.release_key)] == ['C', 'A', 'B']
+
+
+# ------------------------------------------------------------------ b6eeb8b review
+def _junction(link, target):
+    r = subprocess.run(['cmd', '/c', 'mklink', '/J', str(link), str(target)], capture_output=True)
+    if r.returncode:
+        pytest.skip('cannot make a junction here')
+
+
+def test_junction_into_the_same_media_folder_isnt_a_copy(tmp_path):
+    root = tmp_path / 'Media'
+    make(str(root / 'A'), 'Heat 1995.mkv')
+    (root / 'B').mkdir()
+    _junction(root / 'B' / 'linkA', root / 'A')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    (heat,) = [i for i in lb.items(0) if i['title'] == 'Heat']
+    assert not heat.get('copies') and heat['problems'] == []
+
+
+def test_junction_to_another_drive_is_followed_and_kept_when_unplugged(tmp_path):
+    root, films = tmp_path / 'Media', tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root.mkdir()
+    _junction(root / 'More', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    assert [i['title'] for i in lb.items(0)] == ['Alien']
+    cache = dict(lb.fpcache)
+    os.rename(str(films), str(tmp_path / 'unplugged'))     # the junction now points nowhere
+    lb.scan()
+    assert [i['title'] for i in lb.current()] == ['Alien'] and lb.fpcache == cache
+
+
+def test_movie_answers_a_season_folder_hint(tmp_path):
+    make(str(tmp_path / 'm' / 'Show' / 'Season 1'), 'Pilot.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    (it,) = lb.items(0)
+    assert it['kind'] == 'movie' and 'season folder' in it['problems'][0]
+    lb.set_item(it['id'], kind='movie')
+    assert lb.by_id(it['id'])['problems'] == []
+
+
+def test_moving_a_double_episode_to_another_season_keeps_both(tmp_path):
+    for rel in ['Show S01E01-E02.mkv', 'Show S02E03.mkv']:
+        make(str(tmp_path / 'm'), rel)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    dbl = next(i for i in lb.items(0) if i['episode'] == 1)
+    lb.set_item(dbl['id'], season=2)
+    assert lb.by_id(dbl['id'])['episode_last'] == 2
+    assert all(i['problems'] == [] for i in lb.current())
+
+
+def test_edits_write_the_disk_outside_the_lock(lib, monkeypatch):
+    real = os.replace
+    held = []
+
+    def replace(a, b):
+        held.append(lib.lock._is_owned())
+        return real(a, b)
+    monkeypatch.setattr(library.os, 'replace', replace)
+    jp = find(lib, 'Jungle Park')
+    lib.set_item(jp['id'], kids=True)
+    lib.make_collection('JP', [jp['id']])
+    lib.dismiss('toy')
+    assert held and not any(held)
+
+
+def test_three_digit_episode_titles_are_migrated(tmp_path):
+    (tmp_path / 'library.json').write_text(json.dumps({'items': {'abc': {'episode': 100, 'title': 'Show S01E100'}}}),
+                                           encoding='utf-8')
+    assert 'title' not in library.Library(str(tmp_path)).data['items']['abc']

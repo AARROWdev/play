@@ -92,3 +92,19 @@ def test_session_id_is_this_process():
     sid = wintypes.DWORD()
     k32.ProcessIdToSessionId(k32.GetCurrentProcessId(), ctypes.byref(sid))
     assert instance.session_id() == sid.value
+
+
+
+def test_already_exists_with_a_handle_is_closed():
+    """Another session's PLAY holds Global (with a null DACL, so this launch gets a handle back). After this launch
+    sees it, the owner quits: the mutex must disappear, i.e. this launch kept no handle."""
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.OpenMutexW.restype = ctypes.c_void_p
+    loc, glo = names()
+    owner = k32.CreateMutexW(ctypes.byref(instance.sa_from(instance.NULL_DACL)), False, glo)
+    assert owner
+    assert instance.check('PLAYTest-' + uuid.uuid4().hex, glo, session=1) == instance.OTHER_SESSION
+    k32.CloseHandle(owner)                                    # the other session's PLAY quits
+    assert not k32.OpenMutexW(0x00100000, False, glo)         # gone: nobody here still holds it
