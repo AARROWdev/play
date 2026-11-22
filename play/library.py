@@ -204,10 +204,17 @@ class Library:
         requests for made-up ids can't keep the disks busy."""
         with self.lock:
             it = self.by_id(fp, max_age=3600)
-            if not it and rescan and time.monotonic() - self._scanned > 10:
-                self.scan()
+            if not it and rescan and self.rescan_throttled():
                 it = self.by_id(fp, max_age=3600)
             return it['path'] if it else None
+
+    def rescan_throttled(self, every=10.0):
+        """Rescan unless the last scan is under `every` seconds old. True if it scanned."""
+        with self.lock:
+            if self._scanned and time.monotonic() - self._scanned < every:
+                return False
+            self.scan()
+            return True
 
     def _item(self, fp, path, root, ext, size):
         fmt = names.VIDEO_EXTS[ext]

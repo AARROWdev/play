@@ -84,6 +84,7 @@ def test_keepalive_serves_two_requests_on_one_connection(srv):
 def test_renamed_file_still_streams(srv, tmp_path):
     it = jp(srv)
     os.rename(it['path'], str(tmp_path / 'home' / 'jp.mp4'))
+    srv.lib._scanned -= 3              # past the 2 s rescan limit for a known file that moved
     r, b = get(srv, '/media/' + it['id'], {'Range': 'bytes=0-3'})
     assert r.status == 206 and b == bytes(range(4))
 
@@ -129,3 +130,41 @@ def test_stop_frees_the_port(srv):
     again = server.PlayServer(srv.lib, port=port, discovery_port=0)
     assert again.start()
     again.stop()
+
+
+# ------------------------------------------------------------------ review fixes (d375511)
+def test_made_up_ids_dont_cause_scans(srv, monkeypatch):
+    srv.lib.scan()
+    calls = []
+    real = srv.lib.scan
+    monkeypatch.setattr(srv.lib, 'scan', lambda: calls.append(1) or real())
+    for n in range(20):
+        r, _ = get(srv, '/media/%016x' % (0xabc000 + n))
+        assert r.status == 404
+    assert calls == []
+
+
+def test_unopenable_known_file_rescans_at_most_once_per_10s(srv, monkeypatch):
+    it = jp(srv)
+    srv.lib.scan()
+    calls = []
+    real = srv.lib.scan
+    monkeypatch.setattr(srv.lib, 'scan', lambda: calls.append(1) or real())
+    monkeypatch.setattr(srv.lib, 'path_for', lambda fp, rescan=True: it['path'] + '.gone')
+    for _ in range(10):
+        assert get(srv, '/media/' + it['id'])[0].status == 404
+    assert calls == []                 # all within 2 s of the last scan
+    srv.lib._scanned -= 3
+    for _ in range(5):
+        get(srv, '/media/' + it['id'])
+    assert len(calls) == 1
+
+
+def test_invalid_range_gets_whole_file(srv):
+    data = open(jp(srv)['path'], 'rb').read()
+    r, b = get(srv, '/media/' + jp(srv)['id'], {'Range': 'bytes=5-2'})
+    assert r.status == 200 and b == data
+
+
+def test_m2ts_type():
+    assert server.TYPES['m2ts'] == 'video/mp2t'

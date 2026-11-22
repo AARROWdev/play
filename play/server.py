@@ -21,7 +21,7 @@ VERSION = '1.0'
 DISCOVERY_PORT = 8601
 DISCOVER = b'PLAY-DISCOVER'
 CHUNK = 1 << 20
-TYPES = {'mkv': 'video/x-matroska', 'mp4': 'video/mp4', 'mov': 'video/quicktime', 'ts': 'video/mp2t',
+TYPES = {'mkv': 'video/x-matroska', 'mp4': 'video/mp4', 'mov': 'video/quicktime', 'ts': 'video/mp2t', 'm2ts': 'video/mp2t',
          'webm': 'video/webm', 'avi': 'video/x-msvideo'}
 
 
@@ -113,6 +113,7 @@ class PlayServer:
 class _Handler(BaseHTTPRequestHandler):
     srv = None
     protocol_version = 'HTTP/1.1'
+    timeout = 300                      # an abandoned keep-alive connection lets its thread go after 5 minutes
 
     def log_message(self, fmt, *a):
         self.srv.log('%s %s' % (self.client_address[0], fmt % a))
@@ -152,24 +153,26 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _stream(self, fp, head):
         lib = self.srv.lib
-        p = lib.path_for(fp)
-        f = None
-        for attempt in (0, 1):
-            if p:
-                try:
-                    f = open(p, 'rb')
-                    break
-                except OSError:
-                    pass
-            if attempt == 0:           # moved or renamed since the last scan
-                lib.scan()
-                p = lib.path_for(fp)
+        p = lib.path_for(fp)           # an unknown id rescans at most every 10 s (library.path_for)
+        if not p:
+            return self.send_error(404)
+        try:
+            f = open(p, 'rb')
+        except OSError:                # moved or renamed since the last scan: one throttled rescan, then retry
+            lib.rescan_throttled(every=2.0)   # a known id only, so this can't be farmed
+            p = lib.path_for(fp, rescan=False)
+            try:
+                f = open(p, 'rb') if p else None
+            except OSError:
+                f = None
         if f is None:
             return self.send_error(404)
         with f:
             size = os.fstat(f.fileno()).st_size
             start, end = 0, size - 1
             r = re.fullmatch(r'bytes=(\d*)-(\d*)', self.headers.get('Range', '').strip())
+            if r and r.group(1) and r.group(2) and int(r.group(2)) < int(r.group(1)):
+                r = None               # an invalid range is ignored: the whole file (RFC 9110)
             if r and (r.group(1) or r.group(2)):
                 if r.group(1):
                     start = int(r.group(1))
@@ -177,7 +180,7 @@ class _Handler(BaseHTTPRequestHandler):
                         end = min(int(r.group(2)), size - 1)
                 else:
                     start = max(size - int(r.group(2)), 0)
-                if start >= size or end < start:
+                if start >= size:
                     self.send_response(416)
                     self.send_header('Content-Range', f'bytes */{size}')
                     self.send_header('Content-Length', '0')
