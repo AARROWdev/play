@@ -98,12 +98,17 @@ def test_lone_surrogate_name_doesnt_break_saving(lib, tmp_path):
     assert any('Bad' in i['title'] for i in lib.current())
 
 
-@pytest.mark.parametrize('port,skin', [(70000, 'Blue'), ('²', 'Blue'), (True, 'Blue'), (80, 'Blue'),
-                                       (8700, ['Blue']), (8700, 'Plaid')])
-def test_bad_port_or_skin_in_settings_falls_back(tmp_path, port, skin):
-    (tmp_path / 'library.json').write_text(json.dumps({'port': port, 'skin': skin}, ensure_ascii=False))
+@pytest.mark.parametrize('port,skin,want_port,want_skin', [
+    (70000, 'Ember', 8600, 'Ember'), ('²', 'Ember', 8600, 'Ember'), (True, 'Ember', 8600, 'Ember'),
+    (80, 'Ember', 8600, 'Ember'), (8700, ['Blue'], 8700, 'Blue'), (8700, 'Plaid', 8700, 'Blue'),
+    ('8700', 'Neon', 8700, 'Neon'), (8700, 'Violet', 8700, 'Violet')])
+def test_bad_port_or_skin_in_settings_falls_back(tmp_path, port, skin, want_port, want_skin):
+    """Written as UTF-8 (as PLAY writes it), so the value itself is what gets checked; a good value is kept."""
+    (tmp_path / 'library.json').write_text(json.dumps({'port': port, 'skin': skin}, ensure_ascii=False),
+                                           encoding='utf-8')
     lb = library.Library(str(tmp_path))
-    assert library.valid_port(lb.data['port']) and lb.data['skin'] in ('Blue', 'Ember', 'Neon', 'Violet', 'Crimson')
+    assert lb.load_problem is None
+    assert (lb.data['port'], lb.data['skin']) == (want_port, want_skin)
 
 
 def test_set_value_refuses_bad_port_and_skin(lib):
@@ -121,8 +126,9 @@ def test_streaming_lookups_dont_wait_for_a_slow_walk(lib, monkeypatch):
     started = threading.Event()
 
     def slow_walk(*a, **k):
-        started.set()
-        time.sleep(1.5)
+        if not started.is_set():                   # the first file is slow: enough to hold the walk open
+            started.set()
+            time.sleep(1.5)
         return real(*a, **k)
     lib.fpcache.clear()                            # force fingerprinting, made slow
     monkeypatch.setattr(library, 'fingerprint', slow_walk)
@@ -180,8 +186,11 @@ def test_a_file_still_being_written_waits(lib, tmp_path, monkeypatch):
     lib.scan()
     make(str(tmp_path / 'home'), 'Copying Now 2020.mkv')
     lib.scan()
+    lib.scan()                                     # unchanged, but not for 30 s yet
     assert 'Copying Now' not in [i['title'] for i in lib.current()]
-    lib.scan()                                     # same size and time as last look: settled
+    later = library.time.monotonic() + 31
+    monkeypatch.setattr(library.time, 'monotonic', lambda: later)
+    lib.scan()                                     # the same size and time for 30 s: settled
     assert 'Copying Now' in [i['title'] for i in lib.current()]
 
 
@@ -210,14 +219,29 @@ def test_episode_drops_out_of_its_collection(lib):
     assert [m['title'] for m in col['items']] == ['Jungle World']
 
 
-def test_offline_member_survives_a_collection_edit(lib, tmp_path):
-    ids = [find(lib, t)['id'] for t in ('Jungle Park', 'Jungle World', 'Jungle Park III')]
-    cid = lib.make_collection('JP', ids)
-    gone = find(lib, 'Jungle Park III')
-    os.rename(gone['path'], str(tmp_path / 'away.mp4'))           # the drive is unplugged
-    lib.scan()
-    lib.update_collection(cid, name='Dinos', members=[ids[1], ids[0]], order='custom')
-    assert lib.data['collections'][cid]['members'] == [ids[1], ids[0], ids[2]]
+def test_offline_member_survives_a_collection_edit(tmp_path):
+    """The USB drive with one film is unplugged when PLAY starts; editing the collection keeps that film, in its
+    place. A film deleted for good (every folder readable) is dropped."""
+    home, usb = tmp_path / 'home', tmp_path / 'usb'
+    for rel in ['Jungle Park 1993.mp4', 'Jungle World 2015.mp4']:
+        make(str(home), rel)
+    make(str(usb), 'Jungle Park III 2001.mp4')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(home)}, {'path': str(usb)}])
+    ids = {i['title']: i['id'] for i in lb.items(0)}
+    order = [ids['Jungle Park'], ids['Jungle Park III'], ids['Jungle World']]
+    cid = lb.make_collection('JP', order, order='custom')
+    os.rename(str(usb), str(tmp_path / 'unplugged'))
+    again = library.Library(lb.dir)                 # PLAY restarts with the drive gone
+    again.scan()
+    shown = [m['id'] for m in again.collection_members(cid)]
+    assert ids['Jungle Park III'] not in shown and again.unreachable
+    again.update_collection(cid, name='Dinos', members=shown, shown=shown, order='custom')
+    assert again.data['collections'][cid]['members'] == order          # kept, and still second
+    again.set_folders([{'path': str(home)}])                             # the drive is gone for good
+    again.scan()
+    again.update_collection(cid, members=shown, shown=shown)
+    assert again.data['collections'][cid]['members'] == shown
 
 
 def test_dismissed_folder_suggestion_isnt_reoffered_by_first_word(lib, tmp_path):

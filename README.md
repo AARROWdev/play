@@ -21,7 +21,8 @@ the files straight from your drives to the TVs in your house.
 ## Set up
 1. **On the PC:** install **PLAYSetup-&lt;version&gt;.exe** from the
    [latest release](https://github.com/AARROWdev/play/releases/latest) (Windows 10/11, 64-bit). On first run, add
-   the folder or folders your movies and shows are in. PLAY lives in the tray and starts with Windows, so the TVs can
+   the folder or folders your movies and shows are in. PLAY lives in the tray and starts with Windows (from its first
+   start, for your Windows user; Settings switches it off), so the TVs can
    always reach it.
 2. **On the Roku:** add the PLAY channel (see the release notes for the channel link), open it, and pick HOME or KIDS.
    It finds the PC on its own.
@@ -30,15 +31,15 @@ The app isn't code-signed yet, so Windows may show "Windows protected your PC": 
 **Run anyway**. The installer lets PLAY through Windows Firewall on private networks only: if the TV can't find
 the PC, check that Windows calls your home network **Private** (Settings > Network & internet > your network).
 
-"Start PLAY with Windows" applies to the Windows account that runs it. If someone else's administrator password
-was used to install, turn it on once from PLAY's Settings while signed in as yourself.
+Only one PLAY can serve the TVs on a PC. If another Windows user on the same PC already runs it, yours says so and
+closes; use theirs, or quit it there first.
 
 **How to name files:** see [NAMING.md](NAMING.md). In short: `Title (Year).mkv` for movies and
 `Show Name S01E02.mkv` for episodes. Anything PLAY gets wrong can be fixed in the window.
 
 **Uninstall:** Settings > Apps > PLAY > Uninstall. This removes the firewall rule and the start-with-Windows entry.
-If you turned on "Start PLAY with Windows" from Settings while signed in as a different Windows user than the one
-uninstalling, switch it off there first (Windows only lets the uninstaller change its own account's entry).
+Another Windows user's "Start PLAY with Windows" entry lives in their part of the registry, which an uninstaller
+can't reach: switch it off in their PLAY Settings first (left as is, it just points at nothing).
 Your tags and collections stay in `%APPDATA%\PLAY\` (delete the folder to remove them too). Your media is untouched.
 
 ## How it works

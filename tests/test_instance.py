@@ -3,7 +3,13 @@ import ctypes
 import uuid
 from ctypes import wintypes
 
+import pytest
+
 from play import instance
+
+# In session 0 (a service, OpenSSH, a CI runner) the local and Global names are one object; these tests model a
+# normal sign-in session.
+pytestmark = pytest.mark.skipif(instance.session_id() == 0, reason='runs in a normal sign-in session')
 
 
 def names():
@@ -20,13 +26,9 @@ def test_first_copy_then_same_session():
 def hold_denied(name):
     """Create a mutex nobody (not even this process) may open again: what another account's PLAY looks like
     when its mutex has a default, owner-only DACL."""
-    adv = ctypes.WinDLL('advapi32', use_last_error=True)
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
     k32.CreateMutexW.restype = ctypes.c_void_p
-    psd = ctypes.c_void_p()
-    assert adv.ConvertStringSecurityDescriptorToSecurityDescriptorW('D:', 1, ctypes.byref(psd), None)
-    sa = instance._SA(ctypes.sizeof(instance._SA), psd, False)
-    h = k32.CreateMutexW(ctypes.byref(sa), False, name)
+    h = k32.CreateMutexW(ctypes.byref(instance.sa_from('D:')), False, name)
     assert h
     return h
 
@@ -65,3 +67,28 @@ def test_mutexes_have_a_null_dacl():
         rc = adv.GetSecurityInfo(wintypes.HANDLE(h), 6, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(sd))
         k32.CloseHandle(wintypes.HANDLE(h))
         assert rc == 0 and dacl.value is None, (name, rc, dacl.value)
+
+
+
+def test_a_launch_that_finds_another_play_keeps_nothing_open():
+    """Account B's launch saw A's PLAY; once A's PLAY quits, the next launch must be able to start."""
+    loc, glo = names()
+    owner = hold_denied(glo)
+    assert instance.check(loc, glo, session=1) == instance.OTHER_SESSION
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.CloseHandle(owner)                                   # A quits
+    assert instance.check(loc, glo, session=1) == instance.NONE
+
+
+def test_default_session_path():
+    loc, glo = names()
+    assert instance.check(loc, glo) == instance.NONE
+    assert instance.check(loc, glo) == instance.SAME_SESSION
+
+
+def test_session_id_is_this_process():
+    k32 = ctypes.WinDLL('kernel32')
+    sid = wintypes.DWORD()
+    k32.ProcessIdToSessionId(k32.GetCurrentProcessId(), ctypes.byref(sid))
+    assert instance.session_id() == sid.value

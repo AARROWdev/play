@@ -229,7 +229,7 @@ def test_episode_title_follows_edited_numbers(lib):
 def test_unknown_ids_rescan_at_most_every_10s(lib, monkeypatch):
     lib.scan()
     calls = []
-    monkeypatch.setattr(lib, 'scan', lambda: calls.append(1))
+    monkeypatch.setattr(lib, 'scan', lambda *a, **k: calls.append(1))
     for _ in range(20):
         assert lib.path_for('0123456789abcdef') is None
     assert calls == []

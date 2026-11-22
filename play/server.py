@@ -1,7 +1,8 @@
 """The movie server the Roku app talks to, plus LAN discovery so the TV finds this PC by itself.
 
-    GET  /api/info              -> {"name": "PLAY", "pc": <computer name>, "version", "accent"}
-    GET  /api/tv?side=home|kids -> the movies (collections as single entries) and shows for that side of the TV app
+    GET  /api/info              -> {"name": "PLAY", "pc": <computer name>, "ips": [LAN addresses], "version", "accent"}
+    GET  /api/tv?side=home|kids -> the movies (collections as single entries) and shows for that side of the TV app;
+                                   503 {"busy": "reading"} while PLAY reads the folders for the first time
     GET  /media/<id>            -> the file, with HTTP Range support (the Roku seeks with Range requests)
     UDP  8601  "PLAY-DISCOVER"   -> {"name": "PLAY", "pc": ..., "port": <http port>} back to the sender
 
@@ -17,6 +18,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+from . import library
 
 VERSION = '1.0'
 DISCOVERY_PORT = 8601
@@ -37,17 +40,44 @@ class _HTTP(ThreadingHTTPServer):
         super().server_bind()
 
 
-def lan_ip():
-    """This PC's address on the home network (the one a TV would use), or None."""
+def lan_ips():
+    """This PC's home-network addresses (what a TV would type), best first: private IPv4 only, so a VPN or
+    Tailscale address (100.64.0.0/10, public ranges) isn't offered. 192.168.x.x comes first, as home routers use it."""
+    found = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.add(info[4][0])
+    except OSError:
+        pass
+    ips = []
+    for ip in found:
+        a = ipaddress.ip_address(ip)
+        if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
+            ips.append(ip)
+    primary = _default_route_ip()                     # the adapter the PC uses to go out: the home network
+    return sorted(ips, key=lambda ip: (ip != primary, not ip.startswith('192.168.'), ip.startswith('172.'),
+                                       ipaddress.ip_address(ip)))
+
+
+def _default_route_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(('10.255.255.255', 1))          # no packet is sent; it picks the LAN interface
-        ip = s.getsockname()[0]
-        return None if ip.startswith('0.') else ip
+        s.connect(('192.0.2.1', 9))                   # no packet is sent; this asks which adapter would be used
+        return s.getsockname()[0]
     except OSError:
         return None
     finally:
         s.close()
+
+
+def lan_ip():
+    ips = lan_ips()
+    return ips[0] if ips else None
+
+
+# Home-router DNS suffixes a TV may know this PC by (pc.home.arpa, pc.fritz.box ...), besides the bare name
+LAN_SUFFIXES = ('local', 'lan', 'home', 'home.arpa', 'internal', 'localdomain', 'fritz.box', 'attlocal.net',
+                'mshome.net', 'domain', 'router', 'gateway')
 
 
 def host_allowed(host):
@@ -65,17 +95,20 @@ def host_allowed(host):
         return True
     except ValueError:
         pass
+    h = h.rstrip('.')
     pc = socket.gethostname().lower()
-    return h in ('localhost', pc, pc + '.local', pc + '.lan', pc + '.home')
+    names = {'localhost', pc, socket.getfqdn().lower().rstrip('.')}
+    return h in names or any(h == f'{pc}.{suffix}' for suffix in LAN_SUFFIXES)
 
 
 class PlayServer:
-    def __init__(self, lib, port=8600, accent=lambda: '#2f9bff', discovery_port=DISCOVERY_PORT):
+    def __init__(self, lib, port=library.DEFAULT_PORT, accent=None, discovery_port=DISCOVERY_PORT):
         self.lib = lib
         self.port = port
         self.discovery_port = discovery_port
-        self.accent = accent
+        self.accent = accent or (lambda: library.skins.accent())
         self.clients = {}            # ip -> last request time, for "TVs connected"
+        self.refused = {}            # Host -> last time a request with it was turned away (shown in the window)
         self._clients_lock = threading.Lock()
         self.httpd = None
         self.udp = None
@@ -98,8 +131,6 @@ class PlayServer:
         u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.discovery_error = None
         try:
-            if hasattr(socket, 'SIO_UDP_CONNRESET'):      # don't let an ICMP "port unreachable" break recvfrom
-                u.ioctl(socket.SIO_UDP_CONNRESET, False)
             if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
                 u.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             u.bind(('0.0.0.0', self.discovery_port))
@@ -136,25 +167,33 @@ class PlayServer:
         with self._clients_lock:
             return sorted(ip for ip, t in self.clients.items() if now - t < within)
 
+    def refused_hosts(self, within=600):
+        now = time.monotonic()
+        with self._clients_lock:
+            return sorted(h for h, t in self.refused.items() if now - t < within)
+
     def _discovery(self):
         u = self.udp
         while self.udp is u:
+            if not self._discovery_once(u) and self.udp is not u:
+                return
+
+    def _discovery_once(self, u):
+        """Answer one packet. False after an error: a stray packet (a reset left by a TV that already went away) is
+        no reason to stop answering, so the loop goes on unless the socket was closed."""
+        try:
+            data, addr = u.recvfrom(65535)
+        except socket.timeout:
+            return True
+        except OSError:
+            return False
+        if data.strip().startswith(DISCOVER):
+            reply = json.dumps({'name': 'PLAY', 'pc': socket.gethostname(), 'port': self.port}).encode()
             try:
-                data, addr = u.recvfrom(65535)
-            except socket.timeout:
-                continue
+                u.sendto(reply, addr)
             except OSError:
-                # a stray packet (an oversized datagram, a reset from a TV that already left) is no reason to stop
-                # answering; only a closed socket is
-                if self.udp is not u:
-                    return
-                continue
-            if data.strip().startswith(DISCOVER):
-                reply = json.dumps({'name': 'PLAY', 'pc': socket.gethostname(), 'port': self.port}).encode()
-                try:
-                    u.sendto(reply, addr)
-                except OSError:
-                    pass
+                pass
+        return True
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -168,9 +207,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET(head=True)
 
-    def _json(self, obj, head=False):
+    def _json(self, obj, head=False, status=200):
         b = json.dumps(obj).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(b)))
         self.send_header('Cache-Control', 'no-store')
@@ -180,16 +219,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self, head=False):
         srv = self.srv
-        if not host_allowed(self.headers.get('Host')):
-            self.close_connection = True
-            return self.send_error(403)
+        host = self.headers.get('Host')
+        if not host_allowed(host):
+            with srv._clients_lock:                 # the window says a TV was turned away, and by which name
+                srv.refused[str(host)[:100]] = time.monotonic()
+            return self.send_error(403, 'Use the PC\'s IP address')
         srv.seen(self.client_address[0])
         u = urlparse(self.path)
         try:
             if u.path == '/api/info':
-                return self._json({'name': 'PLAY', 'pc': socket.gethostname(), 'ip': lan_ip(), 'version': VERSION,
+                return self._json({'name': 'PLAY', 'pc': socket.gethostname(), 'ips': lan_ips(), 'version': VERSION,
                                    'accent': srv.accent()}, head)
             if u.path == '/api/tv':
+                if not srv.lib._scanned:            # the first read of the folders: say so now, never make the TV wait
+                    return self._json({'busy': 'reading'}, head, status=503)
                 side = (parse_qs(u.query).get('side') or ['home'])[0].lower()
                 view = srv.lib.tv_view(kids=(side == 'kids'))
                 view['accent'] = srv.accent()
@@ -199,7 +242,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self.send_error(404)
             self._stream(m.group(1), head)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError):
-            self.close_connection = True       # the response was cut short: don't wait on this connection again                       # the Roku drops connections whenever it seeks
+            # the Roku drops connections whenever it seeks; a cut-short response must not keep the connection
+            self.close_connection = True
 
     def _stream(self, fp, head):
         lib = self.srv.lib

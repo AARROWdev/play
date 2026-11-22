@@ -4,26 +4,37 @@
 #   dist\PLAY-<ver>-portable-win64.zip  the portable version
 #   dist\PLAY-roku.zip                  the Roku app package
 # Needs: .venv with requirements + pyinstaller, and Inno Setup 6 (winget install JRSoftware.InnoSetup).
-# 'Continue', with every native step checked through $LASTEXITCODE: under 'Stop', Windows PowerShell 5.1 turns
-# PyInstaller's ordinary stderr log into a fatal error when the output is redirected (.\build.ps1 *> build.log).
-$ErrorActionPreference = 'Continue'
+# PowerShell errors stop the build ('Stop'). Native tools run through Invoke-Step, which relaxes that only for the
+# tool itself (Windows PowerShell 5.1 would otherwise turn PyInstaller's ordinary stderr log into a fatal error
+# when the output is redirected, .\build.ps1 *> build.log) and fails on its exit code.
+$ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
-Remove-Item dist -Recurse -Force -ErrorAction SilentlyContinue
+
+function Invoke-Step([string]$what, [scriptblock]$cmd) {
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $cmd 2>&1 | ForEach-Object { "$_" } | Out-Host } finally { $ErrorActionPreference = $old }
+    if ($LASTEXITCODE) { throw "$what failed ($LASTEXITCODE)" }
+}
+
+$py = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+if (-not (Test-Path $py)) { throw '.venv not found: python -m venv .venv, then pip install -r requirements.txt pyinstaller' }
+Remove-Item dist, build\dist -Recurse -Force -ErrorAction SilentlyContinue   # never ship a stale build
 
 $m = Select-String -Path play\server.py -Pattern "^VERSION = '([^']+)'"
 if (-not $m) { throw 'VERSION not found in play\server.py' }
 $ver = $m.Matches[0].Groups[1].Value
 
-.\.venv\Scripts\python tools\make_icon.py
-if ($LASTEXITCODE) { throw "icon failed ($LASTEXITCODE)" }
-.\.venv\Scripts\python -m PyInstaller --noconfirm --windowed --name PLAY --icon "$PSScriptRoot\assets\play.ico" `
-    --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick `
-    --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtMultimedia `
-    --distpath build\dist --workpath build\work --specpath build play_main.py
-if ($LASTEXITCODE) { throw "PyInstaller failed ($LASTEXITCODE)" }
-
+Invoke-Step 'icon' { & $py tools\make_icon.py }
+Invoke-Step 'PyInstaller' {
+    & $py -m PyInstaller --noconfirm --windowed --name PLAY --icon "$PSScriptRoot\assets\play.ico" `
+        --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick `
+        --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtMultimedia `
+        --distpath build\dist --workpath build\work --specpath build play_main.py
+}
 $app = 'build\dist\PLAY'
-Copy-Item README.md, LICENSE, NAMING.md $app -ErrorAction Stop
+if (-not (Test-Path "$app\PLAY.exe")) { throw 'PyInstaller produced no PLAY.exe' }
+Copy-Item README.md, LICENSE, NAMING.md $app
 
 $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (-not $iscc) {
@@ -32,11 +43,14 @@ if (-not $iscc) {
 }
 if (-not $iscc) { throw 'Inno Setup 6 not found (winget install JRSoftware.InnoSetup)' }
 New-Item -ItemType Directory -Force dist | Out-Null
-& $iscc /Q "/DAppVersion=$ver" installer\play.iss
-if ($LASTEXITCODE) { throw "Inno Setup failed ($LASTEXITCODE)" }
+Invoke-Step 'Inno Setup' { & $iscc /Q "/DAppVersion=$ver" installer\play.iss }
 
-Compress-Archive -Path $app -DestinationPath "dist\PLAY-$ver-portable-win64.zip" -Force
-.\.venv\Scripts\python tools\roku_build.py
-if ($LASTEXITCODE) { throw "Roku package failed ($LASTEXITCODE)" }
+$zip = "dist\PLAY-$ver-portable-win64.zip"
+Compress-Archive -Path $app -DestinationPath $zip -Force
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+try { $ok = [bool]($z.Entries | Where-Object { $_.FullName -match '(^|/)PLAY\.exe$' }) } finally { $z.Dispose() }
+if (-not $ok) { throw "$zip has no PLAY.exe (was a file locked?)" }
 
-Write-Host "Built $app\PLAY.exe, dist\PLAYSetup-$ver.exe, dist\PLAY-$ver-portable-win64.zip, dist\PLAY-roku.zip"
+Invoke-Step 'Roku package' { & $py tools\roku_build.py }
+Write-Host "Built $app\PLAY.exe, dist\PLAYSetup-$ver.exe, $zip, dist\PLAY-roku.zip"

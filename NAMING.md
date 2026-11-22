@@ -11,7 +11,7 @@ like. PLAY sorts it out from the names.
 
 **Recommended: `Title (Year).ext`**
 
-| File name | On the TV |
+| File name | Read as (title · year) |
 |---|---|
 | `Jungle Park (1993).mp4` | Jungle Park · 1993 |
 | `The Flea 1986.mkv` | The Flea · 1986 |
@@ -51,7 +51,8 @@ Ann Droid/
 
 - Spell the show name the same way on every episode. Capital letters don't matter.
 - Two different shows with the same name (a remake) stay apart when you add the year: `Doctor Who (1963) S01E01.mkv`
-  and `Doctor Who (2005) S01E01.mkv`, or folders `Doctor Who (1963)/Season 1/`.
+  and `Doctor Who (2005) S01E01.mkv`, or folders `Doctor Who (1963)/Season 1/` (the folder's year counts even when
+  the file names leave it out).
 - A `Specials` folder is season 0, and `Season 1 (2019)` works as a season folder.
 - A file with two episodes in it, `Show S01E01-E02.mkv`, counts as both.
 - A name PLAY can't read as an episode but that looks like one (`Show E03.mkv`, `Show Season 1 Ep 6.mkv`) is listed
@@ -83,15 +84,16 @@ Roku plays most modern files. If a file won't play, it's usually the format insi
 
 | Plays | Usually doesn't |
 |---|---|
-| MP4, MKV, MOV (`.mp4` `.m4v` `.mkv` `.mov`) | AVI, WMV, FLV, MPG, TS (`.ts` `.m2ts`) |
+| MP4, MKV, MOV (`.mp4` `.m4v` `.mkv` `.mov`) | AVI, WMV, FLV, MPG, WebM, TS (`.ts` `.m2ts`) |
 | Video: H.264 (AVC), H.265 (HEVC) on 4K Rokus | Video: MPEG-4 Part 2 (DivX/Xvid), VC-1 |
 | Audio: AAC, AC3 (Dolby Digital), MP3 | Audio: DTS on most Rokus (it passes through to a receiver that supports it) |
 
-PLAY flags AVI, WMV, FLV, MPG and TS files under **Needs a look**. To check what's inside a file, open it in
+PLAY flags AVI, WMV, FLV, MPG, WebM and TS files under **Needs a look**. To check what's inside a file, open it in
 [MediaInfo](https://mediaarea.net/MediaInfo). To fix one, remux or convert it to MP4 (H.264 + AAC) with a tool such as
 HandBrake.
 
 ## Adding new files
 
-Drop them into a media folder. PLAY notices new, renamed and deleted files within a few seconds, and the TV shows
-them the next time you open HOME or KIDS. Nothing needs restarting.
+Drop them into a media folder. With PLAY's window open it looks every few seconds, from the tray every 30 seconds;
+a new file is listed once it has stopped changing for 10 seconds (so a file still being copied isn't half-read).
+The TV shows it the next time you open HOME or KIDS. Nothing needs restarting.

@@ -1,10 +1,10 @@
 """The library window, offscreen. Qt-synthetic only: no real mouse, keyboard, registry or settings folder."""
 import os
+import socket
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest  # noqa: E402
-from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from play import app as pa, library, server, skins  # noqa: E402
@@ -160,19 +160,19 @@ def test_make_a_movie_an_episode(win):
 
 def test_status_shows_port_and_tvs(win):
     win._status()
-    assert f':{win.srv.port}' in win.status.text() or f'port {win.srv.port}' in win.status.text()
-    assert 'waiting for a TV' in win.status.text()
-    win.srv.clients['10.0.0.9'] = __import__('time').monotonic()
+    t = win.status.toolTip()                       # the full text (the bar itself may be shortened)
+    assert f':{win.srv.port}' in t or f'port {win.srv.port}' in t
+    assert 'waiting for a TV' in t
+    win.srv.seen('10.0.0.9')
     win._status()
-    assert '1 TV connected' in win.status.text()
+    assert '1 TV connected' in win.status.toolTip()
 
 
 def free_port():
-    import socket
-    s = socket.socket()
-    s.bind(('0.0.0.0', 0))
-    port = s.getsockname()[1]
-    s.close()
+    sock = socket.socket()
+    sock.bind(('0.0.0.0', 0))
+    port = sock.getsockname()[1]
+    sock.close()
     return port
 
 
@@ -268,7 +268,7 @@ def test_multi_select_edit_never_walks_the_disk(win, monkeypatch):
     pick(win, 'Conor', 'Clip', 'Jungle World')
     calls = []
     real = win.lib.scan
-    monkeypatch.setattr(win.lib, 'scan', lambda: calls.append(1) or real())
+    monkeypatch.setattr(win.lib, 'scan', lambda *a, **k: calls.append(1) or real(*a, **k))
     win.d_kids.click()
     assert calls == []                         # an edit rebuilds from memory: no disk walk at all
     assert all(i['kids'] for i in win.lib.current() if i['title'] in ('Conor', 'Clip', 'Jungle World'))
@@ -365,16 +365,23 @@ def test_collection_menu_survives_a_redraw_while_open(win, monkeypatch):
     assert opened == [cid]
 
 
-def test_reselect_is_one_selection(win, tmp_path):
+def test_reselect_is_one_selection(win, tmp_path, monkeypatch):
     for n in range(400):
         make(str(tmp_path / 'home'), 'Movie %03d.mkv' % n)
     win.lib.scan()
     win.refresh()
     win.view.selectAll()
-    import time
-    t0 = time.monotonic()
+    calls = []
+    real = win._detail_for
+    monkeypatch.setattr(win, '_detail_for', lambda its: calls.append(len(its)) or real(its))
+    selects = []
+    sm = win.view.selectionModel()
+    real_select = sm.select
+    monkeypatch.setattr(sm, 'select', lambda *a: selects.append(1) or real_select(*a))
     win.refresh()
-    assert time.monotonic() - t0 < 3 and len(win.selected_ids()) == len(win.lib.current())
+    # one detail update and one select() call for the whole redraw (the old way: one per row, each signalling)
+    assert calls == [len(win.lib.current())] and len(selects) == 1
+    assert len(win.selected_ids()) == len(win.lib.current())
 
 
 def test_set_episode_keeps_a_typed_title_and_leaves_no_title_behind(win):
@@ -426,11 +433,11 @@ def test_first_draw_never_scans_on_the_gui_thread(qapp, tmp_path, monkeypatch):
     lib = library.Library(str(tmp_path / 'store'))
     lib.set_folders([{'path': str(tmp_path / 'home')}])
     calls = []
-    monkeypatch.setattr(lib, 'scan', lambda: calls.append(1))
+    monkeypatch.setattr(lib, 'scan', lambda *a, **k: calls.append(1))
     srv = server.PlayServer(lib, port=0, discovery_port=0)
     w = pa.Window(lib, srv, pa.Scanner(lib))
     w.timer.stop()
-    assert calls == [] and 'reading your folders' in w.status.text()
+    assert calls == [] and 'reading your folders' in w.status.toolTip()
     w.deleteLater()
 
 
@@ -483,5 +490,183 @@ def test_status_shows_discovery_and_unreachable_problems(win):
     win.srv.discovery_error = 'UDP port 8601 is in use'
     win.lib.unreachable = [r'N:\Media']
     win._status()
-    t = win.status.text()
+    t = win.status.toolTip()
     assert 'UDP port 8601' in t and "Can't reach" in t
+
+
+
+# ------------------------------------------------------------------ second review (122cbc0 / d089fe2)
+def test_scanner_tells_the_window(win, tmp_path):
+    """A background scan that finds something new redraws the window (through the Scanner's signal)."""
+    from PySide6.QtCore import QCoreApplication
+    make(str(tmp_path / 'home'), 'Arrived Later 2021.mkv')
+    win.scanner._run()
+    QCoreApplication.processEvents()
+    assert 'Arrived Later' in titles(win)
+
+
+def test_set_episode_keeps_a_title_you_typed(win):
+    pick(win, 'Ann Droid S01E01')
+    win.d_title.setText('Pilot')
+    win.d_title.setModified(True)
+    win.d_title.editingFinished.emit()
+    pick(win, 'Pilot')
+    win.d_ep.setValue(9)
+    win._apply_episode()
+    it = next(i for i in win.lib.current() if i.get('episode') == 9)
+    assert it['title'] == 'Pilot'
+
+
+def test_kind_buttons_light_by_selection(win):
+    pick(win, 'Conor')
+    assert win.d_movie.isChecked() and not win.d_show.isChecked()
+    pick(win, 'Ann Droid S01E01')
+    assert win.d_show.isChecked() and not win.d_movie.isChecked()
+    pick(win, 'Conor', 'Ann Droid S01E01')
+    assert not win.d_movie.isChecked() and not win.d_show.isChecked()
+
+
+def test_banner_label_is_not_the_lowercase_key(win):
+    t = win.banner_text.text()
+    assert '"Jungle"' in t and '"jungle"' not in t
+
+
+def test_icon_follows_the_skin_and_close_notice_uses_it(win, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(pa, 'play_icon', lambda accent=None, size=256: seen.setdefault('accent', accent))
+    win.lib.set_value('skin', 'Crimson')
+    win.icon()
+    assert seen['accent'] == skins.get('Crimson')['accent']
+
+
+def test_specials_label_in_rows_and_tree(win, tmp_path):
+    make(str(tmp_path / 'home' / 'Ann Droid' / 'Specials'), 'Ann Droid S00E01.mkv')
+    win.lib.scan()
+    set_filter(win, 'shows')
+    top = win.model.item(0, 0)
+    labels = [top.child(r, 0).text() for r in range(top.rowCount())]
+    assert 'Specials' in labels
+    set_filter(win, 'all')
+    row = next(r for r in range(win.model.rowCount()) if win.model.item(r, 0).text().startswith('Ann Droid S00E01'))
+    assert 'Specials' in win.model.item(row, 2).text()
+
+
+def test_edit_collection_rechecks_it_exists(win, monkeypatch):
+    opened = []
+    monkeypatch.setattr(pa.CollectionDialog, 'exec', lambda self: opened.append(1) or QDialog.Rejected)
+    win._edit_collection('gone1234')
+    assert opened == []
+
+
+def test_menu_and_settings_dialog_are_deleted(win, monkeypatch):
+    deleted = []
+    real = pa.run_dialog
+    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: deleted.append(type(d).__name__) or
+                        (d.deleteLater() or 0))
+    pick(win, 'Conor')
+    win._menu(win.view.visualRect(win.model.index(0, 0)).center())
+    assert 'QMenu' in deleted
+    destroyed = []
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', lambda self: (self.destroyed.connect(lambda: destroyed.append(1)),
+                                                                 QDialog.Rejected)[1])
+    win.open_settings()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert destroyed == [1]
+
+
+def test_scan_cadence(win, monkeypatch):
+    kicks = []
+    monkeypatch.setattr(win.scanner, 'kick', lambda: kicks.append(1))
+    monkeypatch.setattr(win, 'isVisible', lambda: True)
+    monkeypatch.setattr(win, 'isMinimized', lambda: False)
+    assert win.scan_every() == 6
+    monkeypatch.setattr(win, 'isMinimized', lambda: True)
+    assert win.scan_every() == 30
+    win.lib._scanned = __import__('time').monotonic()
+    win._tick()
+    assert kicks == []                         # just scanned: no walk
+    win.lib._scanned -= 31
+    win._tick()
+    assert kicks == [1]
+
+
+def test_not_ready_guards(qapp, tmp_path, monkeypatch):
+    """Before the first scan, selecting and the Collections view never call into the library's views."""
+    make(str(tmp_path / 'home'), 'Heat 1995.mkv')
+    lib = library.Library(str(tmp_path / 'store'))
+    lib.set_folders([{'path': str(tmp_path / 'home')}])
+    for name in ('scan', 'collection_members', 'suggestions', 'by_id'):
+        monkeypatch.setattr(lib, name, lambda *a, _n=name, **k: (_ for _ in ()).throw(AssertionError(_n)))
+    srv = server.PlayServer(lib, port=0, discovery_port=0)
+    w = pa.Window(lib, srv, pa.Scanner(lib))
+    w.timer.stop()
+    set_filter(w, 'collections')
+    w._sel_changed()
+    w.deleteLater()
+
+
+def test_restart_button_uses_the_typed_port(win, monkeypatch):
+    got = []
+    monkeypatch.setattr(win, 'restart_server', lambda port=None: got.append(port))
+    d = pa.SettingsDialog(win, win.lib)
+    d.port.setValue(18999)
+    btn = next(b for b in d.findChildren(pa.QPushButton) if b.text() == 'Restart server')
+    btn.click()
+    d.deleteLater()
+    assert got == [18999]
+
+
+def test_autostart_written_only_when_changed(win, monkeypatch):
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: None)   # never a modal in a test
+    win.lib.data['port'] = win.srv.port                                # Settings shows the running port
+    writes = []
+    monkeypatch.setattr(pa, 'set_autostart', lambda on: writes.append(on))
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', lambda self: QDialog.Accepted)
+    win.open_settings()
+    assert writes == []
+
+    def tick(d):
+        d.auto.setChecked(True)
+        return QDialog.Accepted
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', tick)
+    win.open_settings()
+    assert writes == [True]
+
+
+def test_other_session_notice_is_silent_at_sign_in(monkeypatch):
+    shown = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: shown.append(a))
+    assert pa.other_session_notice(['PLAY.exe', '--tray'], session=1) is False
+    assert pa.other_session_notice(['PLAY.exe'], session=0) is False
+    assert shown == []
+    assert pa.other_session_notice(['PLAY.exe'], session=1) is True and len(shown) == 1
+
+
+def test_hand_over_reaches_the_listener(qapp, monkeypatch):
+    """A second launch (another process) hands over: the listener answers "ok" and shows the window."""
+    import subprocess
+    import sys
+    import time
+    from PySide6.QtCore import QCoreApplication
+    key = 'PLAY-test-' + __import__('uuid').uuid4().hex
+    monkeypatch.setattr(pa, 'INSTANCE_KEY', key)
+    shown = []
+    listener = pa.start_listener(lambda: shown.append(1))
+    code = ('import os, sys; os.environ["QT_QPA_PLATFORM"] = "offscreen"; sys.path[:0] = [".", "tests"]; '
+            'from PySide6.QtCore import QCoreApplication; a = QCoreApplication([]); '
+            'from play import app; print(app.hand_over(timeout=5))')
+    p = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True,
+                         env={**os.environ, 'PLAY_INSTANCE_KEY': key})
+    end = time.monotonic() + 20
+    while p.poll() is None and time.monotonic() < end:
+        QCoreApplication.processEvents()
+        time.sleep(0.01)
+    out = p.communicate(timeout=5)[0].strip()
+    listener.close()
+    assert out == 'True' and shown == [1]
+
+
+def test_hand_over_gives_up_when_nobody_listens(monkeypatch):
+    monkeypatch.setattr(pa, 'INSTANCE_KEY', 'PLAY-test-' + __import__('uuid').uuid4().hex)
+    assert pa.hand_over(timeout=0.5) is False

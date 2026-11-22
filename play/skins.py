@@ -15,7 +15,16 @@ SKINS = {
 DEFAULT = "Blue"
 
 
-def get(name):
-    t = dict(SKINS.get(name) or SKINS[DEFAULT])
-    t["name"] = name if name in SKINS else DEFAULT
+def name(value):
+    """A skin name from settings, or the default for anything else (a list, a typo, nothing)."""
+    return value if isinstance(value, str) and value in SKINS else DEFAULT
+
+
+def get(value):
+    t = dict(SKINS[name(value)])
+    t["name"] = name(value)
     return t
+
+
+def accent(value=None):
+    return get(value)["accent"]

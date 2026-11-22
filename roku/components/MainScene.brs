@@ -23,6 +23,9 @@ sub init()
     m.accent = "0xF2C14EFF"
     m.query = ""
     m.items = []
+    m.seekTo = 0
+    m.focusBefore = ""
+    m.dialogHandled = false
     m.server = ""
     if m.reg.Exists("server") then m.server = m.reg.Read("server")
     if m.server = "" then discover() else showMenu()
@@ -74,26 +77,32 @@ end sub
 
 sub askAddress()
     kb = CreateObject("roSGNode", "KeyboardDialog")
-    kb.title = "The PC's address, e.g. 192.168.1.20 (shown at the bottom of PLAY's window on the PC)"
+    kb.title = "The PC's address"
+    kb.message = ["For example 192.168.1.20. It is shown at the bottom of PLAY's window on the PC."]
     kb.buttons = ["OK", "Cancel"]
     kb.text = ""
     kb.observeField("buttonSelected", "onAddress")
-    kb.observeField("wasClosed", "onDialogClosed")
     m.addrKb = kb
-    m.top.dialog = kb
+    openDialog(kb)
 end sub
 
 sub onAddress()
     t = m.addrKb.text.Trim()
     pressed = m.addrKb.buttonSelected
+    m.dialogHandled = true
     m.addrKb.close = true
-    if pressed <> 0 or t = "" then return
-    url = serverUrl(t)
-    if url = "" then return
+    url = ""
+    if pressed = 0 then url = serverUrl(t)
+    if url = ""
+        if pressed = 0 then m.status.text = "That isn't an address PLAY can use. Try it like 192.168.1.20."
+        restoreFocus()
+        return
+    end if
     useServer(url)
 end sub
 
-' "192.168.1.20", "192.168.1.20:8700", "http://192.168.1.20/" or "https://…" -> "http://192.168.1.20:8600"
+' What was typed -> "http://host:port", or "" if it isn't an address. Accepts "192.168.1.20" (port 8600),
+' "192.168.1.20:8700", "192.168.1.20 8700", "http://192.168.1.20/", "https://...", "[fe80::1]:8600".
 function serverUrl(t as string) as string
     t = t.Trim()
     low = LCase(t)
@@ -102,17 +111,62 @@ function serverUrl(t as string) as string
     else if Left(low, 8) = "https://"
         t = Mid(t, 9)
     end if
-    slash = Instr(1, t, "/")
-    if slash > 0 then t = Left(t, slash - 1)
-    if t = "" then return ""
-    if Instr(1, t, ":") = 0 then t = t + ":8600"
-    return "http://" + t
+    for each stopper in ["/", "?", "#"]
+        cut = Instr(1, t, stopper)
+        if cut > 0 then t = Left(t, cut - 1)
+    end for
+    t = t.Trim()
+    sp = Instr(1, t, " ")
+    if sp > 0 then t = Left(t, sp - 1) + ":" + Mid(t, sp + 1).Trim()
+    host = t
+    port = ""
+    if Left(t, 1) = "["                          ' [IPv6]:port
+        close = Instr(1, t, "]")
+        if close = 0 then return ""
+        host = Left(t, close)
+        rest = Mid(t, close + 1)
+        if Left(rest, 1) = ":" then port = Mid(rest, 2)
+    else
+        colon = Instr(1, t, ":")
+        if colon > 0
+            host = Left(t, colon - 1)
+            port = Mid(t, colon + 1)
+        end if
+    end if
+    if host = "" then return ""
+    if port = "" then port = "8600"
+    n = port.ToInt()
+    if n < 1 or n > 65535 or n.ToStr() <> port then return ""
+    return "http://" + host + ":" + port
 end function
 
-' Back on a keyboard or dialog closes it without a button: give focus back to what was on screen.
+' Dialogs remember what had focus; Back on a keyboard or dialog (no button) gives it back. A button's handler
+' moves focus itself, so wasClosed after a button press does nothing.
+sub openDialog(d as object)
+    if m.bar.hasFocus()
+        m.focusBefore = "bar"
+    else if m.list.hasFocus()
+        m.focusBefore = "list"
+    else
+        m.focusBefore = ""
+    end if
+    m.dialogHandled = false
+    d.observeField("wasClosed", "onDialogClosed")
+    m.top.dialog = d
+end sub
+
 sub onDialogClosed()
+    if m.dialogHandled then return
+    restoreFocus()
+end sub
+
+sub restoreFocus()
     if m.video.visible then return
-    if m.level = "menu"
+    if m.focusBefore = "bar" and m.bar.visible
+        focusBar()
+    else if m.focusBefore = "list" and m.list.visible and m.items.Count() > 0
+        focusList()
+    else if m.level = "menu"
         m.menu.setFocus(true)
     else if m.level = "type"
         m.typeMenu.setFocus(true)
@@ -188,11 +242,26 @@ end sub
 
 sub onLoaded()
     if m.level <> "loading" then return        ' Back was pressed while it loaded
+    r = m.task.result
     v = invalid
-    if m.task.result <> "ERROR" then v = ParseJson(m.task.result)
+    if Left(r, 6) <> "ERROR:" then v = ParseJson(r)
     if v = invalid or type(v) <> "roAssociativeArray" or v.movies = invalid
+        if r = "ERROR:503"                    ' PLAY is running, reading its folders for the first time
+            m.status.text = "PLAY is reading your folders on the PC…"
+            m.retry = CreateObject("roSGNode", "Timer")
+            m.retry.duration = 3
+            m.retry.observeField("fire", "load")
+            m.retry.control = "start"
+            return
+        end if
         m.level = "offline"
-        m.status.text = "Can't reach PLAY at " + m.server + ". Is the PLAY program running on the PC?"
+        if r = "ERROR:403"
+            m.status.text = "PLAY refused the address " + m.server + ". Type the PC's IP address instead (* then the last line)."
+        else if r = "ERROR:0"
+            m.status.text = "Can't reach PLAY at " + m.server + ". Is the PC on, with the PLAY program running?"
+        else
+            m.status.text = "PLAY at " + m.server + " answered with an error (" + Mid(r, 7) + "). Try again in a moment."
+        end if
         m.hint.text = "OK  try again       *  find the PC again"
         m.top.setFocus(true)
         return
@@ -253,8 +322,15 @@ end sub
 function label(it as object) as string
     t = it.title
     if it.kind = "movie" and it.year <> invalid then t = t + "   (" + it.year.ToStr() + ")"
-    if m.resume.Exists(it.url) then t = t + "   ·  resume at " + fmtTime(m.resume.Read(it.url).ToInt())
+    spot = resumeAt(it.url)
+    if spot > 0 then t = t + "   ·  resume at " + fmtTime(spot)
     return t
+end function
+
+' Resume points are stored as "seconds|when saved" (older builds: just seconds).
+function resumeAt(url as string) as integer
+    if not m.resume.Exists(url) then return 0
+    return m.resume.Read(url).Split("|")[0].ToInt()
 end function
 
 sub showMovies()
@@ -354,14 +430,14 @@ sub openSearch(scope as string)
     kb.buttons = ["Search", "Cancel"]
     kb.text = m.query
     kb.observeField("buttonSelected", "onSearchButton")
-    kb.observeField("wasClosed", "onDialogClosed")
     m.kb = kb
-    m.top.dialog = kb
+    openDialog(kb)
 end sub
 
 sub onSearchButton()
     q = m.kb.text.Trim()
     pressed = m.kb.buttonSelected
+    m.dialogHandled = true
     m.kb.close = true
     if pressed = 0 and q <> ""
         if m.level <> "search" then m.beforeSearch = m.level
@@ -388,16 +464,15 @@ end sub
 sub pick(mv as object)
     m.current = mv
     spot = 0
-    if m.resume.Exists(mv.url) then spot = m.resume.Read(mv.url).ToInt()
+    spot = resumeAt(mv.url)
     if spot >= 30
         d = CreateObject("roSGNode", "Dialog")
         d.title = mv.title
         d.buttons = ["Resume from " + fmtTime(spot), "Start over"]
         d.observeField("buttonSelected", "onResumeButton")
-        d.observeField("wasClosed", "onDialogClosed")
         m.resumeDlg = d
         m.resumePos = spot
-        m.top.dialog = d
+        openDialog(d)
     else
         play(mv, 0)
     end if
@@ -405,6 +480,7 @@ end sub
 
 sub onResumeButton()
     b = m.resumeDlg.buttonSelected
+    m.dialogHandled = true
     m.resumeDlg.close = true
     if b = 0 then play(m.current, m.resumePos) else play(m.current, 0)
 end sub
@@ -414,13 +490,14 @@ sub play(mv as object, start as integer)
     c = CreateObject("roSGNode", "ContentNode")
     c.url = m.server + mv.url
     fmt = mv.format
-    if fmt = "mov" then fmt = "mp4"            ' Roku has no "mov" stream format; mp4 covers .mov and .m4v
+    if mv.stream <> invalid then fmt = mv.stream   ' the PC says how to play it (a .mov plays as mp4)
+    if fmt = "mov" then fmt = "mp4"
     c.streamFormat = fmt
     c.title = mv.title
-    if start > 0 then c.PlayStart = start
     m.video.content = c
-    m.video.notificationInterval = 10
-    m.lastSave = 0
+    m.video.notificationInterval = 1
+    m.seekTo = start              ' seek once playing, rather than PlayStart, so rewinding before it still works
+    m.lastSave = start            ' the spot just read isn't written straight back
     m.video.visible = true
     m.video.control = "play"
     m.video.setFocus(true)
@@ -431,8 +508,16 @@ end sub
 sub trimResume()
     keys = m.resume.GetKeyList()
     if keys.Count() < 300 then return
+    ages = []                                  ' drop the 50 saved longest ago (no time stored: oldest)
+    for each k in keys
+        parts = m.resume.Read(k).Split("|")
+        t = 0
+        if parts.Count() > 1 then t = parts[1].ToInt()
+        ages.Push({key: k, t: t})
+    end for
+    ages.SortBy("t")
     for i = 0 to 49
-        m.resume.Delete(keys[i])
+        m.resume.Delete(ages[i].key)
     end for
 end sub
 
@@ -449,32 +534,41 @@ function fmtTime(sec as integer) as string
 end function
 
 ' Every 30 s of playback the spot is saved, so Home or switching the TV off still resumes about where it stopped.
+' While playing, the spot is saved every 30 s, so Home or switching the TV off still resumes about where it stopped.
 sub onPosition()
-    if m.current = invalid then return
+    if m.current = invalid or m.video.state <> "playing" then return
     p = Int(m.video.position)
     if p - m.lastSave >= 30 or m.lastSave - p >= 30
         m.lastSave = p
-        savePos()
+        savePos(false)
     end if
 end sub
 
-sub savePos()
+' keepOnly: only ever write a spot (on an error, a position near 0 must not wipe a good resume point).
+sub savePos(keepOnly = false as boolean)
     if m.current = invalid then return
+    url = m.current.url
     spot = Int(m.video.position)
     dur = m.video.duration
     if spot < 30 or (dur > 0 and spot > dur - 120)
-        m.resume.Delete(m.current.url)
+        if keepOnly or not m.resume.Exists(url) then return
+        m.resume.Delete(url)
     else
-        if not m.resume.Exists(m.current.url) then trimResume()
-        m.resume.Write(m.current.url, spot.ToStr())
+        if not m.resume.Exists(url) then trimResume()
+        if not m.resume.Write(url, spot.ToStr() + "|" + CreateObject("roDateTime").AsSeconds().ToStr())
+            print "resume point not saved"
+        end if
     end if
     m.resume.Flush()
 end sub
 
 sub onState()
     s = m.video.state
-    if s = "error"
-        savePos()
+    if s = "playing" and m.seekTo > 0
+        m.video.seek = m.seekTo
+        m.seekTo = 0
+    else if s = "error"
+        savePos(true)
         msg = "This file can't play on this TV (error " + m.video.errorCode.ToStr() + ": " + m.video.errorMsg + "). The PLAY window on the PC lists files that need a look."
         print "PLAYBACK ERROR "; m.video.errorCode; " "; m.video.errorMsg; " | "; m.video.errorStr
         closeVideo(false)
@@ -491,10 +585,10 @@ sub onState()
 end sub
 
 sub closeVideo(save as boolean)
-    if save then savePos()
+    if save then savePos(false)
+    m.current = invalid            ' before stop: the position dropping to 0 must not reach onPosition as this title
     m.video.control = "stop"
     m.video.visible = false
-    m.current = invalid
     at = m.list.itemFocused        ' refresh the resume marks, stay on the same row
     redraw(m.level)
     m.list.jumpToItem = at

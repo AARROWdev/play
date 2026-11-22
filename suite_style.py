@@ -3,8 +3,6 @@
 The same file ships in each app's repo. Change it in one, copy it to the others.
 A theme is a dict of colours: accent, light, bg, base, alt, mid, bar, line, sel.
 """
-from PySide6.QtGui import QColor, QPalette
-
 TEXT = "#e6e8ec"
 MUTED = "#b9bcc4"
 PLACEHOLDER = "#7d8088"
@@ -48,6 +46,7 @@ def stylesheet(t):
 
 
 def apply(app, t=BLUE):
+    from PySide6.QtGui import QColor, QPalette     # here, so the colours above can be read without Qt
     app.setStyle("Fusion")
     p = QPalette()
     for role, key in ((QPalette.Window, "mid"), (QPalette.Base, "base"), (QPalette.AlternateBase, "alt"),

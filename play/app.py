@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 
 import suite_style
 from . import instance, library, names, server, skins
+from .names import plural
 
 APP = 'PLAY'
-INSTANCE_KEY = 'PLAY-library-window'
+INSTANCE_KEY = os.environ.get('PLAY_INSTANCE_KEY', 'PLAY-library-window')   # (tests use their own)
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ID = Qt.UserRole + 1          # item id (file fingerprint) or collection id
 KIND = Qt.UserRole + 2        # 'item' | 'collection' | 'show' | 'season'
@@ -26,12 +27,19 @@ FILTERS = [('all', 'Everything'), ('movies', 'Movies'), ('shows', 'Shows'), ('co
            ('kids', 'Kids'), ('hidden', 'Hidden'), ('attention', 'Needs a look')]
 
 
-def play_icon(accent='#2f9bff', size=256):
+def play_icon(accent=None, size=256):
+    return QIcon(play_pixmap(accent, size))
+
+
+def play_pixmap(accent=None, size=256):
+    """The PLAY mark drawn at exactly size x size pixels (the .ico gets one per size, so small ones stay crisp)."""
+    accent = accent or skins.accent()
     pm = QPixmap(size, size)
+    pm.setDevicePixelRatio(1)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor('#13161c'))
+    p.setBrush(QColor(skins.get(None)['base']))
     p.setPen(Qt.NoPen)
     p.drawRoundedRect(0, 0, size, size, size * 0.22, size * 0.22)
     tri = QPainterPath()
@@ -42,17 +50,13 @@ def play_icon(accent='#2f9bff', size=256):
     p.setBrush(QColor(accent))
     p.drawPath(tri)
     p.end()
-    return QIcon(pm)
+    return pm
 
 
-def plural(n, word, many=None):
-    return f'{n} {word if n == 1 else (many or word + "s")}'
-
-
-def run_dialog(d):
-    """exec() a dialog, then let Qt delete it (a tray app runs for weeks; dialogs mustn't pile up)."""
+def run_dialog(d, *args):
+    """exec() a dialog or menu, then let Qt delete it (a tray app runs for weeks; they mustn't pile up)."""
     try:
-        return d.exec()
+        return d.exec(*args)
     finally:
         d.deleteLater()
 
@@ -156,7 +160,7 @@ class SettingsDialog(QDialog):
         grid = QHBoxLayout()
         grid.addWidget(QLabel('Port'))
         self.port = QSpinBox()
-        self.port.setRange(1024, 65535)
+        self.port.setRange(library.PORT_MIN, library.PORT_MAX)
         self.port.setValue(lib.data['port'])
         grid.addWidget(self.port)
         grid.addSpacing(24)
@@ -176,7 +180,7 @@ class SettingsDialog(QDialog):
         restart = QPushButton('Restart server')
         restart.setObjectName('chip')
         restart.setToolTip('Stop and start the movie server, e.g. after the network changed')
-        restart.clicked.connect(lambda: parent.restart_server())
+        restart.clicked.connect(lambda: parent.restart_server(self.port.value()))
         row2.addWidget(restart)
         row2.addStretch()
         v.addLayout(row2)
@@ -229,10 +233,13 @@ class CollectionDialog(QDialog):
         v.addLayout(seg)
         self.list = QListWidget()
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.known = {}                     # id -> the film as listed when the dialog opened
         for m in lib.collection_members(cid):
+            self.known[m['id']] = m
             it = QListWidgetItem(f"{m['title']}   {m.get('year') or ''}".rstrip())
             it.setData(ID, m['id'])
             self.list.addItem(it)
+        self.shown = list(self.known)
         v.addWidget(self.list)
         self.order.buttonToggled.connect(self._order_changed)
         self._order_changed()
@@ -255,17 +262,9 @@ class CollectionDialog(QDialog):
     def _order_changed(self, *_):
         custom = self.custom.isChecked()
         self.list.setDragEnabled(custom)
-        if not custom:   # show the year order right away
-            ids = [m['id'] for m in sorted(self._members(), key=library.release_key)]
-            self._reorder(ids)
-
-    def _members(self):
-        out = []
-        for i in range(self.list.count()):
-            it = self.lib.by_id(self.list.item(i).data(ID))
-            if it:
-                out.append(it)
-        return out
+        if not custom:   # show the year order right away (from the list as it opened: nothing is dropped)
+            ids = [self.list.item(i).data(ID) for i in range(self.list.count())]
+            self._reorder(sorted(ids, key=lambda i: library.release_key(self.known[i])))
 
     def _reorder(self, ids):
         rows = {self.list.item(i).data(ID): self.list.item(i).text() for i in range(self.list.count())}
@@ -281,7 +280,7 @@ class CollectionDialog(QDialog):
 
     def _save(self):
         members = [self.list.item(i).data(ID) for i in range(self.list.count())]
-        self.lib.update_collection(self.cid, name=self.name.text(), members=members,
+        self.lib.update_collection(self.cid, name=self.name.text(), members=members, shown=self.shown,
                                    order='custom' if self.custom.isChecked() else 'year')
         self.accept()
 
@@ -292,6 +291,14 @@ class Window(QMainWindow):
         super().__init__()
         self.lib, self.srv, self.scanner = lib, srv, scanner
         self.filter = 'all'
+        self.drawn = None
+        self.sel = []
+        self._title_for = None
+        self._ep_dirty_for = None
+        self._filling = False
+        self._told = False
+        self.tray = None
+        self._view_cache = (None, None, None)       # (library version, rail counts, suggestions)
         self.setWindowTitle('PLAY')
         self.resize(1280, 780)
         split = QSplitter()
@@ -304,7 +311,8 @@ class Window(QMainWindow):
         self.setCentralWidget(split)
         self.status = QLabel()
         self.statusBar().addWidget(self.status, 1)
-        self.statusBar().addPermanentWidget(QLabel('Files are never renamed or moved'))
+        self.status_note = QLabel('Files are never renamed or moved')
+        self.statusBar().addPermanentWidget(self.status_note)
         scanner.changed.connect(self._changed)
         self.ticks = 0
         self.timer = QTimer(self, interval=1500, timeout=self._tick)
@@ -458,10 +466,14 @@ class Window(QMainWindow):
         return w
 
     # ---- data -> view
+    def scan_every(self):
+        """Seconds between folder scans: 6 with the window on screen, 30 in the tray or minimized."""
+        return 6 if self.isVisible() and not self.isMinimized() else 30
+
     def _tick(self):
-        """Status every 1.5 s; a folder scan every 6 s while the window is open, every 30 s from the tray."""
-        self.ticks += 1
-        if self.ticks % (4 if self.isVisible() else 20) == 1 or not self.lib._scanned:
+        """Status every 1.5 s; a folder scan when the last one is older than scan_every()."""
+        import time
+        if not self.lib._scanned or time.monotonic() - self.lib._scanned >= self.scan_every():
             self.scanner.kick()
         self._status()
 
@@ -477,10 +489,19 @@ class Window(QMainWindow):
         notes = []
         if self.srv.running and self.srv.discovery_error:
             notes.append(self.srv.discovery_error)
+        refused = self.srv.refused_hosts() if self.srv.running else []
+        if refused:
+            notes.append(f'A TV used the name {refused[-1]}, which PLAY refuses: type the PC\'s IP address on it')
         if self.lib.unreachable:
-            notes.append('Can\'t reach ' + ', '.join(self.lib.unreachable) + ' (showing what was there last)')
+            notes.append('Can\'t reach ' + ', '.join(self.lib.unreachable))
+        if self.lib.read_only:
+            notes.append('Settings are not being saved (see the warning at start)')
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
-        self.status.setText(f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes))
+        text = f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes)
+        self.status.setToolTip(text.replace('   ·   ', '\n'))
+        # the full text is in the tooltip; the bar shows what fits
+        room = self.width() - self.status_note.sizeHint().width() - 40     # the bar's width, less the fixed note
+        self.status.setText(self.status.fontMetrics().elidedText(text, Qt.ElideRight, max(200, room)))
 
     def _filter_changed(self, cur, _prev):
         if cur:
@@ -502,18 +523,20 @@ class Window(QMainWindow):
                 or (f == 'collections' and i['collection']))
 
     def _changed(self):
-        if self.lib.version != getattr(self, 'drawn', None):   # only rebuild for something not on screen yet
+        if self.lib.version != self.drawn:   # only rebuild for something not on screen yet
             self.refresh()
 
     def refresh(self):
-        self.drawn = self.lib.version
+        # before the first scan nothing is drawn for real: leave drawn unset so the scan's result is drawn
+        self.drawn = self.lib.version if self.lib._scanned else None
         items = self.lib._items
         ready = bool(self.lib._scanned)      # before the first scan nothing may call into the library's views
         selected = set(self.selected_ids())
         scroll = self.view.verticalScrollBar().value()
-        self._rail_counts(items)
+        self._rail_counts(items, ready)
         self._banner(ready)
         self.model.clear()
+        self._row_items = {}
         cols = ['Title', 'Type', 'Show / collection', 'Year', 'Format', 'Size', 'Plays on Roku']
         self.model.setHorizontalHeaderLabels(cols)
         shown = [i for i in items if self._matches(i)]
@@ -536,15 +559,24 @@ class Window(QMainWindow):
         self.view.verticalScrollBar().setValue(scroll)
         self._status()
 
-    def _rail_counts(self, items):
-        n = {'all': len(items), 'movies': 0, 'shows': len({i['show'].lower() for i in items if i['kind'] == 'episode' and not i['hidden']}),
-             'collections': len(self.lib.data['collections']), 'kids': 0, 'hidden': 0, 'attention': 0}
-        for i in items:
-            n['hidden'] += i['hidden']
-            if not i['hidden']:
-                n['movies'] += i['kind'] == 'movie'
-                n['kids'] += i['kids']
-                n['attention'] += bool(i['problems'])
+    def _view_data(self, items, ready):
+        """Rail counts and suggestions, worked out once per library version."""
+        key = (self.lib.version, ready)
+        if self._view_cache[0] != key:
+            n = {'all': len(items), 'movies': 0,
+                 'shows': len({names.show_key(i['show']) for i in items if i['kind'] == 'episode' and not i['hidden']}),
+                 'collections': len(self.lib.data['collections']), 'kids': 0, 'hidden': 0, 'attention': 0}
+            for i in items:
+                n['hidden'] += i['hidden']
+                if not i['hidden']:
+                    n['movies'] += i['kind'] == 'movie'
+                    n['kids'] += i['kids']
+                    n['attention'] += bool(i['problems'])
+            self._view_cache = (key, n, self.lib.suggestions() if ready else [])
+        return self._view_cache[1], self._view_cache[2]
+
+    def _rail_counts(self, items, ready=True):
+        n, _ = self._view_data(items, ready)
         for r in range(self.rail.count()):
             it = self.rail.item(r)
             key = it.data(ID)
@@ -553,7 +585,7 @@ class Window(QMainWindow):
             it.setForeground(QColor('#ff6b5b') if key == 'attention' and n[key] else QColor(suite_style.TEXT))
 
     def _banner(self, ready=True):
-        sug = self.lib.suggestions() if ready else []
+        sug = self._view_data(self.lib._items, ready)[1]
         self.suggestion = sug[0] if sug else None
         self.banner.setVisible(bool(self.suggestion))
         if self.suggestion:
@@ -567,7 +599,8 @@ class Window(QMainWindow):
 
     def _row(self, i):
         coll = self.lib.data['collections'].get(i['collection'], {}).get('name', '') if i['collection'] else ''
-        where = f"{i['show']} · Season {i['season']}" if i['kind'] == 'episode' else coll
+        season = 'Specials' if i.get('season') == 0 else f"Season {i.get('season')}"
+        where = f"{i['show']} · {season}" if i['kind'] == 'episode' else coll
         cells = [i['title'], 'Episode' if i['kind'] == 'episode' else 'Movie', where, str(i.get('year') or ''),
                  i['format'].upper(), human_size(i['size']),
                  'Yes' if i['roku_ok'] else 'Check']
@@ -584,12 +617,13 @@ class Window(QMainWindow):
             for c in (row[0], row[6]):
                 c.setToolTip('\n'.join(i['problems']))
         row[5].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._row_items.setdefault(i['id'], row[0])     # for reselecting by id without walking the tree
         return row
 
     def _fill_shows(self, root, shown):
         shows, label = {}, {}
         for i in shown:                      # capital letters don't matter, as on the TV
-            key = i['show'].lower()
+            key = names.show_key(i['show'])
             label.setdefault(key, i['show'])
             shows.setdefault(key, {}).setdefault(i['season'], []).append(i)
         for key in sorted(shows, key=lambda k: names.sort_key(label[k])):
@@ -632,16 +666,24 @@ class Window(QMainWindow):
         stays instant."""
         if not ids:
             return
-        sel = QItemSelection()
         last = self.model.columnCount() - 1
-
-        def walk(parent):
-            for r in range(self.model.rowCount(parent)):
-                idx = self.model.index(r, 0, parent)
-                if idx.data(KIND) == 'item' and idx.data(ID) in ids:
-                    sel.select(idx, idx.sibling(r, last))
-                walk(idx)
-        walk(self.model.index(-1, -1).parent())
+        rows = {}                                   # parent -> row numbers, from the id map (no tree walk)
+        for i in ids:
+            item = self._row_items.get(i)
+            if item is not None:
+                idx = item.index()
+                rows.setdefault(idx.parent(), []).append(idx.row())
+        sel = QItemSelection()
+        for parent, rs in rows.items():             # consecutive rows become one range: selectedRows stays fast
+            rs.sort()
+            start = prev = rs[0]
+            for r in rs[1:] + [None]:
+                if r is not None and r == prev + 1:
+                    prev = r
+                    continue
+                sel.select(self.model.index(start, 0, parent), self.model.index(prev, last, parent))
+                if r is not None:
+                    start = prev = r
         sm = self.view.selectionModel()
         sm.blockSignals(True)
         sm.select(sel, QItemSelectionModel.SelectionFlag.Select)
@@ -653,7 +695,7 @@ class Window(QMainWindow):
         self._detail_for([self.lib.by_id(i) for i in self.selected_ids()])
 
     def _ep_edited(self, *_):
-        if len(getattr(self, 'sel', [])) == 1 and not getattr(self, '_filling', False):
+        if len(self.sel) == 1 and not self._filling:
             self._ep_dirty_for = self.sel[0]['id']       # an episode edit in progress: a redraw must keep it
 
     def _detail_for(self, its):
@@ -662,8 +704,8 @@ class Window(QMainWindow):
         on = bool(its)
         for wdg in (self.d_title, self.d_movie, self.d_show, self.d_kids, self.d_hide, self.d_col, self.d_open):
             wdg.setEnabled(on)
-        one_id = its[0]['id'] if len(its) == 1 else None
-        editing_ep = one_id is not None and getattr(self, '_ep_dirty_for', None) == one_id
+        one = its[0] if len(its) == 1 else None
+        editing_ep = one is not None and self._ep_dirty_for == one['id']
         if not editing_ep:
             self._ep_dirty_for = None
             self.ep_box.setVisible(len(its) == 1 and its[0]['kind'] == 'episode')
@@ -674,10 +716,9 @@ class Window(QMainWindow):
             self.d_problems.clear()
             self.d_col.clear()
             return
-        one = its[0] if len(its) == 1 else None
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
         self.d_title.setEnabled(bool(one))
-        same = one and getattr(self, '_title_for', None) == one['id']
+        same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
             self.d_title.setText(one['title'] if one else '')
         self._title_for = one['id'] if one else None
@@ -716,15 +757,19 @@ class Window(QMainWindow):
         self.refresh()
 
     def _title_done(self):
+        changed = False
         if len(self.sel) == 1:
             t = self.d_title.text().strip()
             if t and t != self.sel[0]['title']:
                 self.lib.set_item(self.sel[0]['id'], title=t)
-                self.d_title.setModified(False)   # committed: the box follows the title again
-                self.refresh()
+                changed = True
+        self.d_title.setModified(False)          # Enter, changed or not: the box follows the title again
+        if changed:
+            self.refresh()
 
     def _set_kind(self, kind):
         if kind == 'movie':
+            self._ep_dirty_for = None             # an episode edit in progress is dropped: it's a movie now
             self._set_all(kind='movie')
             return
         if len(self.sel) != 1:
@@ -737,6 +782,8 @@ class Window(QMainWindow):
         self.ep_box.setVisible(True)
         self._filling = True
         self.d_showname.setText(i['title'])
+        self.d_season.setValue(1)               # a new episode starts at S01E01, not S00E00
+        self.d_ep.setValue(1)
         self._filling = False
         self._ep_dirty_for = i['id']
         self.d_showname.setFocus()
@@ -777,7 +824,7 @@ class Window(QMainWindow):
             cid = self.lib.make_collection(s['name'], s['members'])
             self.refresh()
             run_dialog(CollectionDialog(self, self.lib, cid))
-            self.refresh()
+            self._changed()                            # redraws only if the dialog changed something
 
     def _double(self, idx):
         if idx.sibling(idx.row(), 0).data(KIND) == 'collection':
@@ -786,24 +833,20 @@ class Window(QMainWindow):
     def _edit_collection(self, cid):
         if cid in self.lib.data['collections']:       # it may have gone while a menu was open
             run_dialog(CollectionDialog(self, self.lib, cid))
-            self.refresh()
+            self._changed()
 
     def _menu(self, pos):
         idx = self.view.indexAt(pos)
         # read what the row stands for now: a background redraw while the menu is open frees the model's items
         cid = idx.sibling(idx.row(), 0).data(ID) if idx.isValid() and idx.sibling(idx.row(), 0).data(KIND) == 'collection' else None
+        if not cid and not self.sel:
+            return
         m = QMenu(self)
         if cid:
             m.addAction('Edit collection…', lambda: self._edit_collection(cid))
-        elif self.sel:
-            m.addAction('Show in folder', self._open_folder)
         else:
-            m.deleteLater()
-            return
-        try:
-            m.exec(self.view.viewport().mapToGlobal(pos))
-        finally:
-            m.deleteLater()
+            m.addAction('Show in folder', self._open_folder)
+        run_dialog(m, self.view.viewport().mapToGlobal(pos))
 
     def _open_folder(self):
         if self.sel:
@@ -812,19 +855,17 @@ class Window(QMainWindow):
     def open_settings(self, first_run=False):
         d = SettingsDialog(self, self.lib, first_run)
         accepted = d.exec() == QDialog.Accepted
-        folders, port, skin, auto = d.values()
-        auto_was = d.auto_was
-        d.deleteLater()
+        try:
+            folders, port, skin, auto = d.values()
+            auto_was = d.auto_was
+        finally:
+            d.deleteLater()
         if not accepted:
             return
         self.lib.set_folders(folders)
         self.lib.set_value('skin', skin)
-        t = apply_skin(QApplication.instance(), skin)
-        icon = play_icon(t['accent'])                  # the window and tray icons follow the skin
-        QApplication.instance().setWindowIcon(icon)
-        self.setWindowIcon(icon)
-        if getattr(self, 'tray', None):
-            self.tray.setIcon(icon)
+        apply_skin(QApplication.instance(), skin)
+        self.set_icons()
         try:   # only when the box was changed: another copy (portable, from source) mustn't remove this one's
             if auto != auto_was:
                 set_autostart(auto)
@@ -853,15 +894,33 @@ class Window(QMainWindow):
         self._status()
         return ok
 
+    def icon(self):
+        return play_icon(skins.accent(self.lib.data['skin']))
+
+    def set_icons(self):
+        """The app, window and tray icons follow the skin."""
+        icon = self.icon()
+        QApplication.instance().setWindowIcon(icon)
+        if self.tray:
+            self.tray.setIcon(icon)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._status()                         # re-fit the status text to the new width
+
+    def bring_up(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def closeEvent(self, e):
-        if QSystemTrayIcon.isSystemTrayAvailable() and getattr(self, 'tray', None):
+        if QSystemTrayIcon.isSystemTrayAvailable() and self.tray:
             e.ignore()
             self.hide()
-            if not getattr(self, '_told', False):
+            if not self._told:
                 self._told = True
                 self.tray.showMessage('PLAY is still running', 'Your TVs can keep watching. Right-click the '
-                                      'PLAY icon to quit.', play_icon(skins.get(self.lib.data['skin'])['accent']),
-                                      4000)
+                                      'PLAY icon to quit.', self.icon(), 4000)
         else:                          # no tray to live in: closing the window quits PLAY
             e.accept()
             QApplication.instance().quit()
@@ -887,6 +946,63 @@ def apply_skin(app, name):
     return t
 
 
+def hand_over(timeout=5.0):
+    """Ask the running PLAY to show its window. Retries while its listener may not be up yet (it is starting), and
+    waits for its "ok". True if it answered."""
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        sock = QLocalSocket()
+        sock.connectToServer(INSTANCE_KEY)
+        if sock.waitForConnected(500):
+            sock.write(b'show')
+            sock.waitForBytesWritten(1000)
+            ok = sock.waitForReadyRead(2000) and bytes(sock.readAll()).startswith(b'ok')
+            sock.disconnectFromServer()
+            if ok:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def other_session_notice(argv, session=None):
+    """Another Windows user (or a scheduled task) already runs PLAY. Say so only when someone launched this copy
+    by hand; at sign-in (--tray) or in session 0 there is no one to read it, and a box nobody closes would keep
+    this process alive."""
+    if '--tray' in argv or (instance.session_id() if session is None else session) == 0:
+        return False
+    QMessageBox.information(None, 'PLAY', 'PLAY is already running on this PC, for another Windows user or as a '
+                            'scheduled task, and serving the TVs there. This copy will close.')
+    return True
+
+
+def start_listener(on_show):
+    """The listener a second launch hands over to: it answers "ok" and calls on_show."""
+    listener = QLocalServer()
+
+    def second_launch():
+        while listener.hasPendingConnections():
+            conn = listener.nextPendingConnection()
+            conn.disconnected.connect(conn.deleteLater)
+
+            def answer(c=conn):
+                if getattr(c, '_answered', False):
+                    return
+                c._answered = True
+                c.readAll()
+                c.write(b'ok')
+                c.flush()
+                c.disconnectFromServer()
+                on_show()
+            conn.readyRead.connect(answer)
+            if conn.bytesAvailable():                 # the "show" may already be here: readyRead won't come again
+                answer()
+    listener.newConnection.connect(second_launch)          # connected before listen(): no connection is missed
+    QLocalServer.removeServer(INSTANCE_KEY)
+    listener.listen(INSTANCE_KEY)
+    return listener
+
+
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
@@ -897,56 +1013,41 @@ def main(argv=None):
     # scan, so a launch during a slow startup scan still reaches it.
     who = instance.check()
     if who == instance.SAME_SESSION:
-        sock = QLocalSocket()
-        sock.connectToServer(INSTANCE_KEY)
-        if sock.waitForConnected(5000):
-            sock.write(b'show')
-            sock.waitForBytesWritten(1000)
-            sock.disconnectFromServer()
+        hand_over()
         return 0
     if who == instance.OTHER_SESSION:
-        QMessageBox.information(None, 'PLAY', 'PLAY is already running for another Windows user on this PC. '
-                                'Only one copy can serve the TVs, so this one will close.')
+        other_session_notice(argv)
         return 0
-    shown = {'window': None, 'pending': False}
-    listener = QLocalServer()
-    QLocalServer.removeServer(INSTANCE_KEY)
-    listener.listen(INSTANCE_KEY)
-
-    def second_launch():
-        conn = listener.nextPendingConnection()
-        if conn:
-            conn.disconnected.connect(conn.deleteLater)
-            conn.disconnectFromServer()
-        w_ = shown['window']
-        if w_ is None:
-            shown['pending'] = True          # still starting up: show the window once it exists
-        else:
-            w_.showNormal()
-            w_.raise_()
-            w_.activateWindow()
-    listener.newConnection.connect(second_launch)
+    shown = {'window': None}
+    # listening starts before the first scan; a hand-over that arrives early is answered once the loop runs
+    listener = start_listener(lambda: shown['window'] and shown['window'].bring_up())
     lib = library.Library()
     t = apply_skin(app, lib.data['skin'])
     app.setWindowIcon(play_icon(t['accent']))
-    srv = server.PlayServer(lib, port=lib.data['port'], accent=lambda: skins.get(lib.data['skin'])['accent'])
+    srv = server.PlayServer(lib, port=lib.data['port'], accent=lambda: skins.accent(lib.data['skin']))
     srv.start()
+    if lib.fresh:                     # a first start: PLAY starts with Windows, so the TVs can always reach it
+        try:
+            set_autostart(True)
+        except OSError:
+            pass
     scanner = Scanner(lib)
     w = Window(lib, srv, scanner)
     tray = QSystemTrayIcon(play_icon(t['accent']), app)
     tray.setToolTip('PLAY')
     menu = QMenu()
-    menu.addAction('Open library', lambda: (w.showNormal(), w.raise_(), w.activateWindow()))
+    menu.addAction('Open library', w.bring_up)
     menu.addAction('Restart server', w.restart_server)
     menu.addSeparator()
     menu.addAction('Quit PLAY', app.quit)
     tray.setContextMenu(menu)
-    tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and (w.showNormal(), w.activateWindow()))
+    tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and w.bring_up())
     tray.show()
     w.tray = tray
+    w.listener = listener
     shown['window'] = w
     scanner.kick()
-    if '--tray' not in argv or shown['pending']:
+    if '--tray' not in argv:
         w.show()
     if not lib.folders:
         w.show()

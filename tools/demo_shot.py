@@ -36,6 +36,8 @@ def main():
         for f in files:
             with open(os.path.join(media, sub, f), 'wb') as fh:
                 fh.write(f.encode() * 4000)
+    library.SETTLE = 0                    # the demo files were written a moment ago
+    server.lan_ips = lambda: ['192.168.1.20']  # a public image must not show this PC's real address
     qa = QApplication([])
     qa.setFont(QFont('Segoe UI', 9))      # offscreen Qt has no system font of its own
     lib = library.Library(os.path.join(tmp, 'store'))

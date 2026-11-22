@@ -23,6 +23,7 @@ def srv(tmp_path):
     lib.set_folders([{'path': str(home)}, {'path': str(kids), 'kids': True}])
     s = server.PlayServer(lib, port=0, discovery_port=0, accent=lambda: '#ff8a1f')
     assert s.start()
+    lib.scan()                                     # the app scans at start; until then /api/tv answers 503
     yield s
     s.stop()
 
@@ -138,7 +139,7 @@ def test_made_up_ids_dont_cause_scans(srv, monkeypatch):
     srv.lib.scan()
     calls = []
     real = srv.lib.scan
-    monkeypatch.setattr(srv.lib, 'scan', lambda: calls.append(1) or real())
+    monkeypatch.setattr(srv.lib, 'scan', lambda *a, **k: calls.append(1) or real(*a, **k))
     for n in range(20):
         r, _ = get(srv, '/media/%016x' % (0xabc000 + n))
         assert r.status == 404
@@ -150,7 +151,7 @@ def test_unopenable_known_file_rescans_at_most_once_per_2s(srv, monkeypatch):
     srv.lib.scan()
     calls = []
     real = srv.lib.scan
-    monkeypatch.setattr(srv.lib, 'scan', lambda: calls.append(1) or real())
+    monkeypatch.setattr(srv.lib, 'scan', lambda *a, **k: calls.append(1) or real(*a, **k))
     monkeypatch.setattr(srv.lib, 'path_for', lambda fp, rescan=True: it['path'] + '.gone')
     for _ in range(10):
         assert get(srv, '/media/' + it['id'])[0].status == 404
@@ -192,17 +193,44 @@ def test_this_pcs_name_is_an_allowed_host(srv):
 
 
 def test_discovery_survives_stray_packets(srv):
-    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    u.sendto(b'x' * 4000, ('127.0.0.1', srv.discovery_port))          # oversized
-    gone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)             # asks, then leaves before the answer
+    """A reset left by a TV that already went away raises on the next recvfrom: the loop must keep answering.
+    Driven directly through _discovery_once with a socket that raises, so it doesn't depend on timing."""
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        def recvfrom(self, n):
+            self.calls += 1
+            raise ConnectionResetError(10054, 'reset by a TV that left')
+    flaky = Flaky()
+    assert srv._discovery_once(flaky) is False and flaky.calls == 1
+    # and the real loop is still answering after that kind of packet
+    gone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     gone.sendto(b'PLAY-DISCOVER', ('127.0.0.1', srv.discovery_port))
     gone.close()
-    time.sleep(0.3)
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     u.settimeout(3)
     u.sendto(b'PLAY-DISCOVER', ('127.0.0.1', srv.discovery_port))
     d = json.loads(u.recvfrom(512)[0])
     u.close()
     assert d['name'] == 'PLAY'
+
+
+def test_discovery_loop_continues_after_an_error(srv, monkeypatch):
+    results = iter([False, False, True])
+    calls = []
+
+    def once(u):
+        calls.append(1)
+        r = next(results, None)
+        if r is None:
+            srv.udp = None                         # stop the loop
+            return True
+        return r
+    monkeypatch.setattr(srv, '_discovery_once', once)
+    srv.udp = 'sock'
+    srv._discovery()
+    assert len(calls) == 4
 
 
 def test_discovery_port_in_use_is_reported(srv):
@@ -213,18 +241,15 @@ def test_discovery_port_in_use_is_reported(srv):
 
 def test_info_has_the_pcs_address(srv):
     d = json.loads(get(srv, '/api/info')[1])
-    assert 'ip' in d
+    assert d['ips'] == server.lan_ips() and all(server.ipaddress.ip_address(ip).is_private for ip in d['ips'])
 
 
 def test_cut_short_response_closes_the_connection(srv, monkeypatch):
     seen = {}
-    real = server._Handler._stream
 
     def boom(self, fp, head):
-        try:
-            raise TimeoutError('client stopped reading')
-        finally:
-            seen['h'] = self
+        seen['h'] = self
+        raise TimeoutError('client stopped reading')
     monkeypatch.setattr(server._Handler, '_stream', boom)
     c = http.client.HTTPConnection('127.0.0.1', srv.port, timeout=5)
     c.request('GET', '/media/' + jp(srv)['id'])
@@ -235,4 +260,64 @@ def test_cut_short_response_closes_the_connection(srv, monkeypatch):
     c.close()
     time.sleep(0.2)
     assert seen['h'].close_connection is True
-    monkeypatch.setattr(server._Handler, '_stream', real)
+
+
+
+def test_clients_are_counted_under_a_lock(srv):
+    import threading
+    stop = threading.Event()
+
+    def add():
+        n = 0
+        while not stop.is_set():
+            srv.seen('10.1.%d.%d' % (n % 4, n % 250))     # new keys keep arriving, but only 1000 of them
+            n += 1
+            if n % 1000 == 0:
+                with srv._clients_lock:
+                    srv.clients.clear()
+    t = threading.Thread(target=add)
+    t.start()
+    try:
+        for _ in range(2000):
+            srv.tvs()                              # never "dictionary changed size during iteration"
+    finally:
+        stop.set()
+        t.join()
+
+
+def test_api_tv_says_busy_before_the_first_scan(tmp_path):
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv')
+    lib = library.Library(str(tmp_path / 'store'))
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    s = server.PlayServer(lib, port=0, discovery_port=0)
+    assert s.start()
+    try:
+        r, b = get(s, '/api/tv?side=home')
+        assert r.status == 503 and json.loads(b) == {'busy': 'reading'}
+        lib.scan()
+        assert get(s, '/api/tv?side=home')[0].status == 200
+    finally:
+        s.stop()
+
+
+def test_refused_host_is_remembered(srv):
+    c = http.client.HTTPConnection('127.0.0.1', srv.port, timeout=5)
+    c.putrequest('GET', '/api/info', skip_host=True)
+    c.putheader('Host', 'evil.example')
+    c.endheaders()
+    assert c.getresponse().status == 403
+    c.close()
+    assert srv.refused_hosts() == ['evil.example']
+
+
+@pytest.mark.parametrize('host', ['{pc}.home.arpa', '{pc}.fritz.box', '{pc}.localdomain', '{pc}.internal',
+                                  '{pc}.lan.', '{pc}:8600'])
+def test_home_network_names_are_allowed(host):
+    assert server.host_allowed(host.format(pc=socket.gethostname()))
+
+
+def test_lan_ips_are_private_and_not_tailscale():
+    import ipaddress
+    for ip in server.lan_ips():
+        a = ipaddress.ip_address(ip)
+        assert a.is_private and a not in ipaddress.ip_network('100.64.0.0/10')

@@ -11,16 +11,16 @@ sys.path.insert(0, ROOT)
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 
-from play.app import play_icon  # noqa: E402
+from play.app import play_pixmap  # noqa: E402
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 
-def png_bytes(icon, size):
+def png_bytes(size):
     data = QByteArray()
     buf = QBuffer(data)
     buf.open(QIODevice.WriteOnly)
-    icon.pixmap(size, size).toImage().scaled(size, size).save(buf, 'PNG')
+    play_pixmap(None, size).toImage().save(buf, 'PNG')
     buf.close()
     return bytes(data)
 
@@ -39,9 +39,8 @@ def ico(images):
 
 if __name__ == '__main__':
     app = QGuiApplication([])
-    icon = play_icon()
     out = os.path.join(ROOT, 'assets', 'play.ico')
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, 'wb') as f:
-        f.write(ico([(s, png_bytes(icon, s)) for s in SIZES]))
+        f.write(ico([(s, png_bytes(s)) for s in SIZES]))
     print('wrote', out, len(SIZES), 'sizes')
