@@ -44,6 +44,8 @@ Name: "{autoprograms}\PLAY"; Filename: "{app}\PLAY.exe"
 Name: "{autodesktop}\PLAY"; Filename: "{app}\PLAY.exe"; Tasks: desktopicon
 
 [Registry]
+; HKCU of the account that runs setup. If another account's admin password was used, PLAY's Settings checkbox
+; turns it on for the signed-in user instead (the README says so).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PLAY"; ValueData: """{app}\PLAY.exe"" --tray"; Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]

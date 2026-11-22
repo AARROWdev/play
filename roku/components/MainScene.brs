@@ -54,7 +54,7 @@ sub onDiscovered()
     found.Push(invalid)
     st = "Pick the PC running PLAY."
     if found.Count() = 1
-        st = "PLAY wasn't found. Is the PLAY program running on your PC, on the same network as this TV? " + "OK on the last line to type its address, or Back to search again."
+        st = "PLAY wasn't found. Is the PLAY program running on your PC, on the same network as this TV? If Windows calls that network Public, set it to Private. " + "Or type the PC's address on the last line."
         titles = ["Search again", "Enter the PC's address myself"]
         found = ["again", invalid]
     end if
@@ -136,6 +136,7 @@ end sub
 
 ' ---------------------------------------------------------------- loading
 sub load()
+    m.level = "loading"
     m.header.text = m.lib
     m.status.text = "Loading…"
     m.hint.text = ""
@@ -147,6 +148,7 @@ sub load()
 end sub
 
 sub onLoaded()
+    if m.level <> "loading" then return        ' Back was pressed while it loaded
     v = ParseJson(m.task.result)
     if v = invalid or v.movies = invalid
         m.level = "offline"
@@ -402,9 +404,10 @@ end sub
 sub onState()
     s = m.video.state
     if s = "error"
-        m.status.text = "Playback error " + m.video.errorCode.ToStr() + ": " + m.video.errorMsg + " " + m.video.errorStr
+        msg = "This file can't play on this TV (error " + m.video.errorCode.ToStr() + ": " + m.video.errorMsg + "). The PLAY window on the PC lists files that need a look."
         print "PLAYBACK ERROR "; m.video.errorCode; " "; m.video.errorMsg; " | "; m.video.errorStr
         closeVideo(false)
+        m.status.text = msg        ' after closeVideo: redrawing the list would overwrite it
     else if s = "paused"
         savePos()
     else if s = "finished"

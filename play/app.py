@@ -535,7 +535,7 @@ class Window(QMainWindow):
         where = f"{i['show']} · Season {i['season']}" if i['kind'] == 'episode' else coll
         cells = [i['title'], 'Episode' if i['kind'] == 'episode' else 'Movie', where, str(i.get('year') or ''),
                  i['format'].upper(), human_size(i['size']),
-                 'Check' if i['problems'] else 'Yes']
+                 'Yes' if i['roku_ok'] else 'Check']
         row = [QStandardItem(c) for c in cells]
         row[0].setData(i['id'], ID)
         row[0].setData('item', KIND)
@@ -544,9 +544,10 @@ class Window(QMainWindow):
         if i['hidden']:
             for c in row:
                 c.setForeground(QColor(suite_style.PLACEHOLDER))
-        row[6].setForeground(QColor('#ff6b5b' if i['problems'] else '#5fd38d'))
-        if i['problems']:
-            row[6].setToolTip('\n'.join(i['problems']))
+        row[6].setForeground(QColor('#5fd38d' if i['roku_ok'] else '#ff6b5b'))
+        if i['problems']:              # missing episodes, copies, formats: shown on hover; the column is just playback
+            for c in (row[0], row[6]):
+                c.setToolTip('\n'.join(i['problems']))
         row[5].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         return row
 

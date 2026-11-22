@@ -27,7 +27,11 @@ the files straight from your drives to the TVs in your house.
    It finds the PC on its own.
 
 The app isn't code-signed yet, so Windows may show "Windows protected your PC": click **More info**, then
-**Run anyway**. The installer lets PLAY through Windows Firewall on private networks only.
+**Run anyway**. The installer lets PLAY through Windows Firewall on private networks only: if the TV can't find
+the PC, check that Windows calls your home network **Private** (Settings > Network & internet > your network).
+
+"Start PLAY with Windows" applies to the Windows account that runs it. If someone else's administrator password
+was used to install, turn it on once from PLAY's Settings while signed in as yourself.
 
 **How to name files:** see [NAMING.md](NAMING.md). In short: `Title (Year).mkv` for movies and
 `Show Name S01E02.mkv` for episodes. Anything PLAY gets wrong can be fixed in the window.
@@ -46,7 +50,7 @@ Your tags and collections stay in `%APPDATA%\PLAY\` (delete the folder to remove
 ## Build
 ```
 python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt pyinstaller pytest
+.venv\Scripts\python -m pip install -r requirements.txt pyinstaller pytest requests
 winget install JRSoftware.InnoSetup   # installer compiler
 .\build.ps1   # -> dist\PLAYSetup-<ver>.exe, dist\PLAY-<ver>-portable-win64.zip, dist\PLAY-roku.zip
 ```

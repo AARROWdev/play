@@ -305,3 +305,14 @@ def test_folder_suggestion_banner_names_the_folder_not_the_path(win, tmp_path):
     win.refresh()
     t = win.banner_text.text()
     assert 'the folder "The Thin Man"' in t and str(tmp_path) not in t and 'Folder:' not in t
+
+
+def test_plays_on_roku_column_is_about_the_format_only(win, tmp_path):
+    make(str(tmp_path / 'home'), 'Ann Droid S01E04.mkv')        # leaves a gap: episode 3 is missing
+    win.lib.scan()
+    win.refresh()
+    rows = {}
+    for r in range(win.model.rowCount()):
+        rows[win.model.item(r, 0).text()] = (win.model.item(r, 6).text(), win.model.item(r, 6).toolTip())
+    assert rows['Ann Droid S01E04'][0] == 'Yes' and 'missing episode 3' in rows['Ann Droid S01E04'][1]
+    assert rows['Clip'][0] == 'Check'
