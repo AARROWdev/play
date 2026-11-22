@@ -16,6 +16,7 @@ sub init()
     m.typeMenu.observeField("buttonSelected", "onType")
     m.list.observeField("itemSelected", "onSelect")
     m.video.observeField("state", "onState")
+    m.video.observeField("position", "onPosition")
     m.reg = CreateObject("roRegistrySection", "play")
     m.resume = CreateObject("roRegistrySection", "resume")
     m.libs = ["HOME", "KIDS"]
@@ -73,10 +74,11 @@ end sub
 
 sub askAddress()
     kb = CreateObject("roSGNode", "KeyboardDialog")
-    kb.title = "The PC's address, e.g. 192.168.1.20 (shown in PLAY on the PC)"
+    kb.title = "The PC's address, e.g. 192.168.1.20 (shown at the bottom of PLAY's window on the PC)"
     kb.buttons = ["OK", "Cancel"]
     kb.text = ""
     kb.observeField("buttonSelected", "onAddress")
+    kb.observeField("wasClosed", "onDialogClosed")
     m.addrKb = kb
     m.top.dialog = kb
 end sub
@@ -86,11 +88,47 @@ sub onAddress()
     pressed = m.addrKb.buttonSelected
     m.addrKb.close = true
     if pressed <> 0 or t = "" then return
-    if Left(LCase(t), 7) <> "http://" then t = "http://" + t
-    rest = Mid(t, 8)
-    if Instr(1, rest, ":") = 0 then t = t + ":8600"
-    useServer(t)
+    url = serverUrl(t)
+    if url = "" then return
+    useServer(url)
 end sub
+
+' "192.168.1.20", "192.168.1.20:8700", "http://192.168.1.20/" or "https://…" -> "http://192.168.1.20:8600"
+function serverUrl(t as string) as string
+    t = t.Trim()
+    low = LCase(t)
+    if Left(low, 7) = "http://"
+        t = Mid(t, 8)
+    else if Left(low, 8) = "https://"
+        t = Mid(t, 9)
+    end if
+    slash = Instr(1, t, "/")
+    if slash > 0 then t = Left(t, slash - 1)
+    if t = "" then return ""
+    if Instr(1, t, ":") = 0 then t = t + ":8600"
+    return "http://" + t
+end function
+
+' Back on a keyboard or dialog closes it without a button: give focus back to what was on screen.
+sub onDialogClosed()
+    if m.video.visible then return
+    if m.level = "menu"
+        m.menu.setFocus(true)
+    else if m.level = "type"
+        m.typeMenu.setFocus(true)
+    else if m.list.visible and m.items.Count() > 0
+        focusList()
+    else if m.bar.visible
+        focusBar()
+    else
+        m.top.setFocus(true)
+    end if
+end sub
+
+function plural(n as integer, word as string) as string
+    if n = 1 then return "1 " + word
+    return n.ToStr() + " " + word + "s"
+end function
 
 ' ---------------------------------------------------------------- the two button screens
 sub hideAll()
@@ -117,7 +155,7 @@ sub showTypeMenu()
     hideAll()
     m.typeMenu.visible = true
     m.header.text = m.lib
-    m.status.text = m.movieCount.ToStr() + " movies, " + m.shows.Count().ToStr() + " shows"
+    m.status.text = plural(m.movieCount, "movie") + ", " + plural(m.shows.Count(), "show")
     m.hint.text = ""
     m.typeMenu.setFocus(true)
 end sub
@@ -150,8 +188,9 @@ end sub
 
 sub onLoaded()
     if m.level <> "loading" then return        ' Back was pressed while it loaded
-    v = ParseJson(m.task.result)
-    if v = invalid or v.movies = invalid
+    v = invalid
+    if m.task.result <> "ERROR" then v = ParseJson(m.task.result)
+    if v = invalid or type(v) <> "roAssociativeArray" or v.movies = invalid
         m.level = "offline"
         m.status.text = "Can't reach PLAY at " + m.server + ". Is the PLAY program running on the PC?"
         m.hint.text = "OK  try again       *  find the PC again"
@@ -213,6 +252,7 @@ end sub
 
 function label(it as object) as string
     t = it.title
+    if it.kind = "movie" and it.year <> invalid then t = t + "   (" + it.year.ToStr() + ")"
     if m.resume.Exists(it.url) then t = t + "   ·  resume at " + fmtTime(m.resume.Read(it.url).ToInt())
     return t
 end function
@@ -221,12 +261,12 @@ sub showMovies()
     titles = []
     for each mv in m.movies
         if mv.kind = "collection"
-            titles.Push(mv.title + "   ·  " + mv.items.Count().ToStr() + " films")
+            titles.Push(mv.title + "   ·  " + plural(mv.items.Count(), "film"))
         else
             titles.Push(label(mv))
         end if
     end for
-    st = m.movieCount.ToStr() + " movies"
+    st = plural(m.movieCount, "movie")
     if m.movies.Count() = 0 then st = "No movies here yet. Add some in PLAY on the PC."
     setList("movies", m.lib + "  ›  MOVIES", titles, m.movies, st)
 end sub
@@ -235,11 +275,9 @@ sub showCollection(c as object)
     m.col = c
     titles = []
     for each mv in c.items
-        t = label(mv)
-        if mv.year <> invalid then t = t + "   (" + mv.year.ToStr() + ")"
-        titles.Push(t)
+        titles.Push(label(mv))
     end for
-    setList("collection", m.lib + "  ›  " + c.title, titles, c.items, c.items.Count().ToStr() + " films, in order")
+    setList("collection", m.lib + "  ›  " + c.title, titles, c.items, plural(c.items.Count(), "film") + ", in order")
 end sub
 
 sub showShows()
@@ -247,16 +285,18 @@ sub showShows()
     for each s in m.shows
         titles.Push(s.name)
     end for
-    setList("shows", m.lib + "  ›  SHOWS", titles, m.shows, m.shows.Count().ToStr() + " shows")
+    setList("shows", m.lib + "  ›  SHOWS", titles, m.shows, plural(m.shows.Count(), "show"))
 end sub
 
 sub showSeasons(show as object)
     m.show = show
     titles = []
     for each se in show.seasons
-        titles.Push("Season " + se.season.ToStr() + "   (" + se.episodes.Count().ToStr() + " episodes)")
+        name = "Season " + se.season.ToStr()
+        if se.season = 0 then name = "Specials"
+        titles.Push(name + "   (" + plural(se.episodes.Count(), "episode") + ")")
     end for
-    setList("seasons", m.lib + "  ›  SHOWS  ›  " + show.name, titles, show.seasons, show.seasons.Count().ToStr() + " seasons")
+    setList("seasons", m.lib + "  ›  SHOWS  ›  " + show.name, titles, show.seasons, plural(show.seasons.Count(), "season"))
 end sub
 
 sub showEpisodes(season as object)
@@ -265,7 +305,9 @@ sub showEpisodes(season as object)
     for each e in season.episodes
         titles.Push(label(e))
     end for
-    setList("episodes", m.lib + "  ›  " + m.show.name + "  ›  Season " + season.season.ToStr(), titles, season.episodes, season.episodes.Count().ToStr() + " episodes")
+    sname = "Season " + season.season.ToStr()
+    if season.season = 0 then sname = "Specials"
+    setList("episodes", m.lib + "  ›  " + m.show.name + "  ›  " + sname, titles, season.episodes, plural(season.episodes.Count(), "episode"))
 end sub
 
 ' Search: everything on this side (movies, films inside collections, episodes), from the bar above any list.
@@ -279,7 +321,7 @@ sub showSearch()
             titles.Push(label(it))
         end if
     end for
-    st = hits.Count().ToStr() + " results for " + Chr(34) + m.query + Chr(34)
+    st = plural(hits.Count(), "result") + " for " + Chr(34) + m.query + Chr(34)
     if hits.Count() = 0 then st = "No matches for " + Chr(34) + m.query + Chr(34) + ". Back returns."
     setList("search", m.lib + "  ›  SEARCH", titles, hits, st)
 end sub
@@ -312,6 +354,7 @@ sub openSearch(scope as string)
     kb.buttons = ["Search", "Cancel"]
     kb.text = m.query
     kb.observeField("buttonSelected", "onSearchButton")
+    kb.observeField("wasClosed", "onDialogClosed")
     m.kb = kb
     m.top.dialog = kb
 end sub
@@ -351,6 +394,7 @@ sub pick(mv as object)
         d.title = mv.title
         d.buttons = ["Resume from " + fmtTime(spot), "Start over"]
         d.observeField("buttonSelected", "onResumeButton")
+        d.observeField("wasClosed", "onDialogClosed")
         m.resumeDlg = d
         m.resumePos = spot
         m.top.dialog = d
@@ -369,13 +413,27 @@ sub play(mv as object, start as integer)
     m.current = mv
     c = CreateObject("roSGNode", "ContentNode")
     c.url = m.server + mv.url
-    c.streamFormat = mv.format
+    fmt = mv.format
+    if fmt = "mov" then fmt = "mp4"            ' Roku has no "mov" stream format; mp4 covers .mov and .m4v
+    c.streamFormat = fmt
     c.title = mv.title
     if start > 0 then c.PlayStart = start
     m.video.content = c
+    m.video.notificationInterval = 10
+    m.lastSave = 0
     m.video.visible = true
     m.video.control = "play"
     m.video.setFocus(true)
+end sub
+
+' Resume points for files that were deleted or replaced are never asked for again; keep at most 300 so the
+' channel's registry space (shared with the PC's address) never fills up.
+sub trimResume()
+    keys = m.resume.GetKeyList()
+    if keys.Count() < 300 then return
+    for i = 0 to 49
+        m.resume.Delete(keys[i])
+    end for
 end sub
 
 function fmtTime(sec as integer) as string
@@ -390,6 +448,16 @@ function fmtTime(sec as integer) as string
     return mm + ":" + ss
 end function
 
+' Every 30 s of playback the spot is saved, so Home or switching the TV off still resumes about where it stopped.
+sub onPosition()
+    if m.current = invalid then return
+    p = Int(m.video.position)
+    if p - m.lastSave >= 30 or m.lastSave - p >= 30
+        m.lastSave = p
+        savePos()
+    end if
+end sub
+
 sub savePos()
     if m.current = invalid then return
     spot = Int(m.video.position)
@@ -397,6 +465,7 @@ sub savePos()
     if spot < 30 or (dur > 0 and spot > dur - 120)
         m.resume.Delete(m.current.url)
     else
+        if not m.resume.Exists(m.current.url) then trimResume()
         m.resume.Write(m.current.url, spot.ToStr())
     end if
     m.resume.Flush()
@@ -405,6 +474,7 @@ end sub
 sub onState()
     s = m.video.state
     if s = "error"
+        savePos()
         msg = "This file can't play on this TV (error " + m.video.errorCode.ToStr() + ": " + m.video.errorMsg + "). The PLAY window on the PC lists files that need a look."
         print "PLAYBACK ERROR "; m.video.errorCode; " "; m.video.errorMsg; " | "; m.video.errorStr
         closeVideo(false)
@@ -479,7 +549,7 @@ function onKeyEvent(key as string, press as boolean) as boolean
             return true
         end if
     end if
-    if key = "options" and (m.level = "menu" or m.level = "offline")
+    if key = "options" and (m.level = "menu" or m.level = "offline" or m.level = "loading")
         m.reg.Delete("server")
         m.reg.Flush()
         discover()

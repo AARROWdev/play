@@ -83,11 +83,11 @@ Roku plays most modern files. If a file won't play, it's usually the format insi
 
 | Plays | Usually doesn't |
 |---|---|
-| MP4, MKV, MOV, TS (`.mp4` `.m4v` `.mkv` `.mov` `.ts` `.m2ts`) | AVI, WMV, FLV, MPG |
+| MP4, MKV, MOV (`.mp4` `.m4v` `.mkv` `.mov`) | AVI, WMV, FLV, MPG, TS (`.ts` `.m2ts`) |
 | Video: H.264 (AVC), H.265 (HEVC) on 4K Rokus | Video: MPEG-4 Part 2 (DivX/Xvid), VC-1 |
 | Audio: AAC, AC3 (Dolby Digital), MP3 | Audio: DTS on most Rokus (it passes through to a receiver that supports it) |
 
-PLAY flags AVI, WMV, FLV and MPG files under **Needs a look**. To check what's inside a file, open it in
+PLAY flags AVI, WMV, FLV, MPG and TS files under **Needs a look**. To check what's inside a file, open it in
 [MediaInfo](https://mediaarea.net/MediaInfo). To fix one, remux or convert it to MP4 (H.264 + AAC) with a tool such as
 HandBrake.
 

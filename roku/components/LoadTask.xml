@@ -2,7 +2,7 @@
 <component name="LoadTask" extends="Task">
     <interface>
         <field id="url" type="string" />
-        <field id="result" type="string" />
+        <field id="result" type="string" alwaysNotify="true" />
     </interface>
     <script type="text/brightscript" uri="LoadTask.brs" />
 </component>

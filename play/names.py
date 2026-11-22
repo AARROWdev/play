@@ -5,8 +5,9 @@ import re
 
 VIDEO_EXTS = {'.mkv': 'mkv', '.mp4': 'mp4', '.m4v': 'mp4', '.mov': 'mov', '.avi': 'avi', '.ts': 'ts',
               '.webm': 'webm', '.wmv': 'wmv', '.mpg': 'mpg', '.mpeg': 'mpg', '.flv': 'flv', '.m2ts': 'ts'}
-# Containers the Roku player opens. Others are listed but flagged; the codecs inside still matter (see the guide).
-ROKU_OK = {'mkv', 'mp4', 'mov', 'ts'}
+# Containers the Roku player opens over the network (a .mov is sent as mp4). Others, MPEG-TS included, are listed
+# but flagged; the codecs inside still matter (see the guide).
+ROKU_OK = {'mkv', 'mp4', 'mov'}
 
 # Release junk. A strong tag (resolution, source, codec) ends the title wherever it appears; the weak words below
 # are real words too ("The Extended Family"), so they are only dropped when they trail the title.
