@@ -80,3 +80,12 @@ def test_prose_examples(rel, want):
 def test_prose_examples_that_stay_movies():
     assert names.episode(r'N:\M\Show\Specials\01 Interview.mkv', r'N:\M') is None
     assert names.movie('Death Race 2000 (1975)') == ('Death Race 2000', 1975)
+
+
+
+def test_prose_examples_more():
+    a = names.episode_info(r'N:\M\Ann Droid S01E01-E02.mkv', r'N:\M')
+    assert (a['episode'], a['last']) == (1, 2)                                      # "counts as both"
+    assert names.episode(r'N:\M\Doctor Who (2005) S01E01.mkv', r'N:\M') == ('Doctor Who (2005)', 1, 1)
+    assert 'no season' in names.looks_like_episode('Show E03')
+    assert 'Season 1 Episode 6' in names.looks_like_episode('Show Season 1 Ep 6')

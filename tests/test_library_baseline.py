@@ -374,3 +374,73 @@ def test_three_digit_episode_titles_are_migrated(tmp_path):
     (tmp_path / 'library.json').write_text(json.dumps({'items': {'abc': {'episode': 100, 'title': 'Show S01E100'}}}),
                                            encoding='utf-8')
     assert 'title' not in library.Library(str(tmp_path)).data['items']['abc']
+
+
+
+# ------------------------------------------------------------------ 7015d01 review
+def test_second_movie_click_keeps_the_answer(tmp_path):
+    make(str(tmp_path / 'm' / 'Show' / 'Season 1'), 'Pilot.mkv')
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    pilot = next(i for i in lb.items(0) if i['title'] == 'Pilot')
+    heat = next(i for i in lb.current() if i['title'] == 'Heat')
+    lb.set_item(pilot['id'], kind='movie')
+    lb.set_items([pilot['id'], heat['id']], kind='movie')          # again, as part of a multi-select
+    assert lb.by_id(pilot['id'])['problems'] == []
+    assert 'kind' not in lb.data['items'].get(heat['id'], {})      # an unflagged movie stores nothing
+
+
+def test_a_movie_in_a_specials_folder_gets_no_hint(tmp_path):
+    make(str(tmp_path / 'm' / 'Specials'), '300 (2006).mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    (it,) = lb.items(0)
+    assert it['kind'] == 'movie' and it['problems'] == []
+
+
+def test_nested_link_targets_and_a_link_to_a_parent_walk_once(tmp_path):
+    films = tmp_path / 'E' / 'Films'
+    make(str(films), 'Heat 1995.mkv')
+    make(str(films / 'Action'), 'Die Hard 1988.mkv')
+    root = tmp_path / 'M' / 'Media'
+    root.mkdir(parents=True)
+    _junction(root / 'L2', films / 'Action')                     # the inner one first, by name order
+    _junction(root / 'Z1', films)
+    _junction(root / 'all', tmp_path / 'M')                       # a link back up, above the media folder
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    its = lb.items(0)
+    assert sorted(i['title'] for i in its) == ['Die Hard', 'Heat']
+    assert all(not i.get('copies') for i in its)
+
+
+def test_offline_directory_symlink_keeps_its_titles(tmp_path):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    root.mkdir()
+    try:
+        os.symlink(str(films), str(root / 'More'), target_is_directory=True)
+    except OSError:
+        pytest.skip('directory symlinks need Developer Mode or admin here')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    assert [i['title'] for i in lb.items(0)] == ['Alien']
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    assert [i['title'] for i in lb.current()] == ['Alien'] and lb.unreachable
+
+
+def test_unreachable_lists_offline_links(tmp_path):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    root.mkdir()
+    _junction(root / 'More', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    lb.items(0)
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    assert any('otherdrive' in u.lower() for u in lb.unreachable)

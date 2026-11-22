@@ -707,12 +707,11 @@ def test_settle_instance_hands_over_when_answered():
     assert who == pa.instance.SAME_SESSION
 
 
-def test_only_the_installed_copy_adds_itself_to_sign_in(monkeypatch):
-    monkeypatch.setenv('ProgramFiles', r'C:\Program Files')
-    monkeypatch.setenv('ProgramW6432', r'C:\Program Files')
-    assert pa.installed_copy(r'C:\Program Files\PLAY\PLAY.exe')
-    assert not pa.installed_copy(r'C:\Users\me\AppData\Local\Temp\Temp1_PLAY.zip\PLAY\PLAY.exe')
-    assert not pa.installed_copy(r'D:\Portable\PLAY\PLAY.exe')
+def test_autostart_is_offered_once_per_user(tmp_path):
+    lb = library.Library(str(tmp_path))
+    assert lb.data['autostart_offered'] is False                  # a zip trial run never sets it (not installed)
+    lb.set_value('autostart_offered', True)
+    assert library.Library(str(tmp_path)).data['autostart_offered'] is True
 
 
 def test_refused_host_is_shown_as_plain_text(win):
@@ -723,8 +722,6 @@ def test_refused_host_is_shown_as_plain_text(win):
 
 
 def test_restart_button_then_cancel_goes_back(win, monkeypatch):
-    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: None)
-    win.lib.data['port'] = win.srv.port
     saved = win.srv.port
     trial = free_port()
 
@@ -736,3 +733,27 @@ def test_restart_button_then_cancel_goes_back(win, monkeypatch):
     monkeypatch.setattr(pa.SettingsDialog, 'exec', try_then_cancel)
     win.open_settings()
     assert win.srv.port == saved and win.srv.running
+
+
+
+# ------------------------------------------------------------------ 7015d01 review
+def test_save_after_restart_button_keeps_the_port(win, monkeypatch):
+    trial = free_port()
+
+    def try_then_save(d):
+        d.port.setValue(trial)
+        next(b for b in d.findChildren(pa.QPushButton) if b.text() == 'Restart server').click()
+        return QDialog.Accepted
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', try_then_save)
+    win.open_settings()
+    assert win.srv.port == trial and win.lib.data['port'] == trial
+    assert library.Library(win.lib.dir).data['port'] == trial
+
+
+def test_installed_copy_is_where_the_uninstaller_is(tmp_path):
+    d = tmp_path / 'Apps' / 'PLAY'
+    d.mkdir(parents=True)
+    (d / 'PLAY.exe').write_bytes(b'')
+    assert not pa.installed_copy(str(d / 'PLAY.exe'))            # portable, or opened from a zip
+    (d / 'unins000.exe').write_bytes(b'')
+    assert pa.installed_copy(str(d / 'PLAY.exe'))                 # a custom install folder still counts

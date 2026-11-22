@@ -24,6 +24,7 @@ sub init()
     m.query = ""
     m.items = []
     m.seekTo = 0
+    m.seekSent = false
     m.focusBefore = ""
     m.dialogHandled = false
     m.server = ""
@@ -509,6 +510,7 @@ sub play(mv as object, start as integer)
     m.video.content = c
     m.video.notificationInterval = 1
     m.seekTo = start              ' seek once playing, rather than PlayStart, so rewinding before it still works
+    m.seekSent = false
     m.lastSave = start            ' the spot just read isn't written straight back
     m.video.visible = true
     m.video.control = "play"
@@ -548,8 +550,12 @@ end function
 ' Every 30 s of playback the spot is saved, so Home or switching the TV off still resumes about where it stopped.
 ' While playing, the spot is saved every 30 s, so Home or switching the TV off still resumes about where it stopped.
 sub onPosition()
-    if m.current = invalid or m.video.state <> "playing" or m.seekTo > 0 then return
+    if m.current = invalid or m.video.state <> "playing" then return
     p = Int(m.video.position)
+    if m.seekTo > 0
+        if p < m.seekTo - 10 then return       ' the seek to the resume point hasn't landed yet
+        m.seekTo = 0                           ' it has: from here on positions are real
+    end if
     if p - m.lastSave >= 30 or m.lastSave - p >= 30
         m.lastSave = p
         savePos(false)
@@ -577,9 +583,9 @@ end sub
 
 sub onState()
     s = m.video.state
-    if s = "playing" and m.seekTo > 0
-        m.video.seek = m.seekTo
-        m.seekTo = 0
+    if s = "playing" and m.seekTo > 0 and not m.seekSent
+        m.video.seek = m.seekTo                ' m.seekTo stays set until a position near it arrives (onPosition)
+        m.seekSent = true
     else if s = "error"
         savePos(true)
         msg = "This file can't play on this TV (error " + m.video.errorCode.ToStr() + ": " + m.video.errorMsg + "). The PLAY window on the PC lists files that need a look."

@@ -57,6 +57,11 @@ def lan_ips(max_age=30.0):
     return list(ips)
 
 
+def forget_lan_ips():
+    global _ips_cache
+    _ips_cache = (0.0, [])
+
+
 def _find_lan_ips():
     found = set()
     try:
@@ -70,7 +75,9 @@ def _find_lan_ips():
         if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
             ips.append(ip)
     primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
-    return sorted(ips, key=lambda ip: (not ip.startswith('192.168.'), ip != primary, ip.startswith('172.'),
+    # the default route first (the home network, or with a full-tunnel VPN the VPN), then 192.168.x.x (home
+    # routers), so the two shown include the home address in both cases, and a VM host-only adapter doesn't push it out
+    return sorted(ips, key=lambda ip: (ip != primary, not ip.startswith('192.168.'), ip.startswith('172.'),
                                        ipaddress.ip_address(ip)))
 
 
@@ -83,11 +90,6 @@ def _default_route_ip():
         return None
     finally:
         s.close()
-
-
-def lan_ip():
-    ips = lan_ips()
-    return ips[0] if ips else None
 
 
 # Home-router DNS suffixes a TV may know this PC by (pc.home.arpa, pc.fritz.box ...), besides the bare name

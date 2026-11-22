@@ -78,15 +78,14 @@ def launch_command():
 
 
 def installed_copy(exe=None):
-    """Is this the installed PLAY (under Program Files)? A portable copy, an exe opened straight from a zip (Windows
-    runs it from a temp folder it later deletes) or a source run never adds itself to sign-in."""
+    """Is this the installed PLAY: the installer's uninstaller sits next to it (whatever folder was chosen)? A
+    portable copy, an exe opened straight from a zip (Windows runs it from a temp folder it later deletes) or a
+    source run never adds itself to sign-in."""
     if exe is None:
         if not getattr(sys, 'frozen', False):
             return False
         exe = sys.executable
-    exe = os.path.normcase(os.path.abspath(exe))
-    roots = [os.environ.get(k) for k in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)')]
-    return any(r and exe.startswith(os.path.normcase(os.path.abspath(r)) + os.sep) for r in roots)
+    return os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(exe)), 'unins000.exe'))
 
 
 def get_autostart():
@@ -888,6 +887,8 @@ class Window(QMainWindow):
             QMessageBox.warning(self, 'PLAY', f'Could not change "Start with Windows": {e}')
         if port != self.srv.port or not self.srv.running:
             self.restart_server(port)
+        elif port != self.lib.data['port']:            # already serving there ("Restart server"): just save it
+            self.lib.set_value('port', port)
         self.scanner.kick()
 
     def restart_server(self, port=None, save=True):
@@ -897,6 +898,7 @@ class Window(QMainWindow):
         new = self.lib.data['port'] if port is None else port
         self.srv.stop()
         self.srv.port = new
+        server.forget_lan_ips()                        # the network may have changed: look again
         ok = self.srv.start()
         if ok and save and new != self.lib.data['port']:
             self.lib.set_value('port', new)
@@ -1055,9 +1057,12 @@ def main(argv=None):
     apply_skin(app, lib.data['skin'])
     srv = server.PlayServer(lib, port=lib.data['port'], accent=lambda: skins.accent(lib.data['skin']))
     srv.start()
-    if lib.fresh and installed_copy():   # a first start of the installed PLAY: start with Windows, for the TVs
+    if not lib.data['autostart_offered'] and installed_copy():
+        # the installed PLAY's first start for this user (a portable or zip trial run before doesn't count):
+        # start with Windows, so the TVs can always reach it. Settings switches it off for good.
         try:
             set_autostart(True)
+            lib.set_value('autostart_offered', True)
         except OSError:
             pass
     scanner = Scanner(lib)

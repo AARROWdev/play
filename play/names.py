@@ -198,8 +198,12 @@ def sort_key(title):
     return _strip_article(title).lower()
 
 
+def plural_word(n, word):
+    return word if n == 1 else word + 's'
+
+
 def plural(n, word):
-    return f'{n} {word if n == 1 else word + "s"}'
+    return f'{n} {plural_word(n, word)}'
 
 
 _WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)*")

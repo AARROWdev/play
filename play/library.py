@@ -84,10 +84,14 @@ def _dict(v):
 
 def _write_json(path, data):
     """Atomic write. ensure_ascii: a file name with a lone surrogate (legal on Windows) can't break the save."""
+    _write_text(path, json.dumps(data, indent=1, ensure_ascii=True))
+
+
+def _write_text(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=1, ensure_ascii=True)
+        f.write(text)
     os.replace(tmp, path)
 
 
@@ -185,7 +189,6 @@ class Library:
         self._scan_lock = threading.Lock()     # one disk walk at a time; taken before lock, never inside it
         self._write_lock = threading.Lock()    # one settings write at a time (taken without lock held)
         self._save_seq = self._saved_seq = 0
-        self.fresh = not os.path.exists(self.path) and not os.path.exists(self.path + '.bak')   # a first start
         d, self.load_problem, self.read_only = load_store(self.path)
         folders, seen = [], set()
         for f in (d.get('folders') if isinstance(d.get('folders'), list) else []):
@@ -206,6 +209,8 @@ class Library:
                             and all(isinstance(m, str) for m in v['members'])},
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
+            # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
+            'autostart_offered': d.get('autostart_offered') is True,
         }
         self._migrate_old_episode_titles()
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
@@ -254,11 +259,7 @@ class Library:
             if seq < self._saved_seq:
                 return
             self._saved_seq = seq
-            os.makedirs(self.dir, exist_ok=True)
-            tmp = self.path + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write(blob)
-            os.replace(tmp, self.path)
+            _write_text(self.path, blob)
             try:
                 shutil.copy2(self.path, self.path + '.bak')
             except OSError:
@@ -310,11 +311,18 @@ class Library:
                 first = self._gen == 0
                 prev_raw = dict(self._raw)
             roots = [os.path.normcase(os.path.abspath(f['path'])) for f in folders]
+            real_roots = set()
+            for f in folders:                        # once per scan (a sleeping NAS answers realpath slowly)
+                try:
+                    real_roots.add(os.path.normcase(os.path.realpath(f['path'])))
+                except OSError:
+                    pass
+            followed = set()                         # link targets followed in this scan, across all folders
             raw, reached, new_pending, dirty, errored = {}, set(), {}, False, []
             for f, root in zip(folders, roots):
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
                 files, ok, changed, errs = _walk(f['path'], others, cache, pending, new_pending, first,
-                                                 [g['path'] for g in folders])
+                                                 real_roots, followed)
                 dirty = dirty or changed
                 if ok:
                     # a subfolder that couldn't be listed keeps what it had: its titles don't vanish
@@ -339,7 +347,7 @@ class Library:
                 self._pending = new_pending
                 self._raw = raw
                 self._live_roots = reached
-                self.unreachable = unreachable
+                self.unreachable = unreachable + sorted(set(errored))   # folders and links that couldn't be read
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
@@ -463,10 +471,11 @@ class Library:
             t, y = names.movie(stem)
             if not t:                            # '1080p.mkv': nothing left to call it
                 t, it['untitled'] = stem, True
-            in_season = names.season_of_dir(os.path.basename(os.path.dirname(path))) is not None
+            in_season = (names.season_of_dir(os.path.basename(os.path.dirname(path))) or 0) > 0
             it.update(kind='movie', title=t, year=y, show=None, season=None, episode=None,
                       near_miss=names.looks_like_episode(stem, in_season))
         it['auto'] = {k: it.get(k) for k in OVERRIDABLE}
+        it['auto_near_miss'] = it['near_miss']
         ov = self.data['items'].get(fp, {})
         for k in OVERRIDABLE:
             if k in ov and valid(k, ov[k]):       # a bad hand-edited value is ignored, not fatal
@@ -517,7 +526,7 @@ class Library:
                 v = v.strip()
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
-            keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('near_miss'))
+            keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('auto_near_miss'))
             if cur is not None and cur['auto'].get(k) == v and not keep:
                 ov.pop(k, None)
             else:
@@ -702,27 +711,42 @@ def _is_junction(entry):
         return bool(getattr(entry.stat(follow_symlinks=False), 'st_reparse_tag', 0))
 
 
-def _walk(root, skip_roots, cache, pending, new_pending, first, all_roots=()):
+FILE_ATTRIBUTE_DIRECTORY = 0x10
+
+
+def _dir_link(entry):
+    """Is this a junction, mount point or directory symlink (followed or not)? A broken one counts too."""
+    try:
+        if not (entry.is_symlink() or _is_junction(entry)):
+            return False
+        return bool(entry.stat(follow_symlinks=False).st_file_attributes & FILE_ATTRIBUTE_DIRECTORY)
+    except (OSError, AttributeError):
+        return False
+
+
+def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=frozenset(), followed=None):
     """One media folder. Returns ([(fp, path, ext, size)], could the folder be listed, did the cache change,
-    [normcased subfolders that couldn't be listed]).
+    [normcased folders that couldn't be listed]).
+
     Folders that are their own media folder (skip_roots) are left to their own walk. Junctions, mount points and
-    links are followed, with a loop guard on their targets. A new file waits until it has looked the same for
-    SETTLE seconds (still copying?), except at startup when it was last written over a minute ago; a known file that
-    was only re-stamped (same size) is re-read at once."""
+    directory links are followed by their real location, and every folder reached that way is checked against the
+    media folders (real_roots) and the link targets already followed in this scan (followed, shared by all walks):
+    so nothing is walked twice (no false copies) and a link back up the tree can't loop. A link whose target is
+    offline is a listing error (its titles are kept). A new file waits until it has looked the same for SETTLE
+    seconds (still copying?), except at startup when it was last written over a minute ago; a known file that was
+    only re-stamped (same size) is re-read at once; a changed size or time means a fresh fingerprint."""
     out, changed, errors = [], False, []
+    followed = set() if followed is None else followed
     try:
         st = os.stat(root)
         if not statmod.S_ISDIR(st.st_mode):
             return [], False, False, []
     except OSError:
         return [], False, False, []
-    # where links may not lead: into this media folder or any other one (each is walked on its own)
-    walked = {os.path.normcase(os.path.realpath(r)) for r in (root, *all_roots)}
-    followed = set()
     now_mono, now = time.monotonic(), time.time()
-    stack = [root]
+    stack = [(root, False)]                       # (folder, reached through a link)
     while stack:
-        d = stack.pop()
+        d, via_link = stack.pop()
         try:
             with os.scandir(d) as it:
                 entries = sorted(it, key=lambda e: e.name)
@@ -733,27 +757,35 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, all_roots=()):
             continue
         subdirs = []
         for e in entries:
-            try:
-                if e.is_dir():
-                    if e.name.startswith('.') or e.name.lower() == '$recycle.bin':
-                        continue
-                    if os.path.normcase(e.path) in skip_roots:
-                        continue
-                    if e.is_symlink() or _is_junction(e):
-                        # a junction, mount point or link: follow it unless it leads into a folder that is walked
-                        # anyway (this media folder or another), or somewhere already followed
-                        try:
-                            os.stat(e.path)                       # an unplugged target: keep what it had
-                        except OSError:
-                            errors.append(os.path.normcase(e.path))
-                            continue
-                        real = os.path.normcase(os.path.realpath(e.path))
-                        if _under(real, walked) or real in followed:
-                            continue
-                        followed.add(real)
-                    subdirs.append(e.path)
+            if e.name.startswith('.') or e.name.lower() == '$recycle.bin':
+                continue
+            if _dir_link(e):
+                try:
+                    real = os.path.normcase(os.path.realpath(e.path))
+                except OSError:
+                    errors.append(os.path.normcase(e.path))
                     continue
+                try:
+                    os.stat(real)
+                except OSError:                            # an unplugged target: keep what it had (files under a
+                    errors.append(real)                    # link are recorded by their real path)
+                    continue
+                if _under(real, real_roots) or _under(real, followed):
+                    continue                               # walked anyway, or already
+                followed.add(real)
+                subdirs.append((real, True))
+                continue
+            try:
+                is_dir = e.is_dir()
             except OSError:
+                continue
+            if is_dir:
+                key = os.path.normcase(e.path)
+                if key in skip_roots:
+                    continue
+                if via_link and (key in real_roots or key in followed):
+                    continue                               # under a link, a media folder or link target: its own walk
+                subdirs.append((e.path, via_link))
                 continue
             ext = os.path.splitext(e.name)[1].lower()
             if ext not in names.VIDEO_EXTS:
@@ -830,5 +862,5 @@ def _mark_problems(items):
         missing = [n for n in range(1, have[-1] + 1) if n not in nums]
         if missing:
             last = max(group, key=lambda i: i['episode'])
-            word = names.plural(len(missing), 'episode').split(' ', 1)[1]
-            last['problems'].append(f'{_season_name(season)} is missing {word} {", ".join(map(str, missing))}')
+            last['problems'].append(f'{_season_name(season)} is missing {names.plural_word(len(missing), "episode")} '
+                                    f'{", ".join(map(str, missing))}')

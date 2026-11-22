@@ -342,8 +342,20 @@ def test_lan_ips_cached(monkeypatch):
     assert calls == [1]
 
 
-def test_home_192_168_first(monkeypatch):
-    monkeypatch.setattr(server, '_default_route_ip', lambda: '10.8.0.6')            # a full-tunnel VPN
-    monkeypatch.setattr(server.socket, 'getaddrinfo', lambda *a: [(0, 0, 0, '', (ip, 0))
-                                                                    for ip in ('10.8.0.6', '192.168.1.20')])
-    assert server._find_lan_ips()[0] == '192.168.1.20'
+def test_shown_addresses_include_home_with_a_vpn_and_with_a_vm_adapter(monkeypatch):
+    def setup(primary, ips):
+        monkeypatch.setattr(server, '_default_route_ip', lambda: primary)
+        monkeypatch.setattr(server.socket, 'getaddrinfo', lambda *a: [(0, 0, 0, '', (ip, 0)) for ip in ips])
+        return server._find_lan_ips()[:2]
+    # a full-tunnel VPN owns the default route: the home 192.168 address is still among the two shown
+    assert setup('10.8.0.6', ['10.8.0.6', '192.168.1.20']) == ['10.8.0.6', '192.168.1.20']
+    # a VMware/VirtualBox host-only 192.168 adapter: the real default-route address stays first
+    assert setup('10.0.0.201', ['10.0.0.201', '192.168.56.1', '192.168.80.1'])[0] == '10.0.0.201'
+
+
+
+def test_restart_forgets_the_cached_addresses(monkeypatch):
+    monkeypatch.setattr(server, '_ips_cache', (server.time.monotonic(), ['10.9.9.9']))
+    server.forget_lan_ips()
+    monkeypatch.setattr(server, '_find_lan_ips', lambda: ['10.0.0.2'])
+    assert server.lan_ips() == ['10.0.0.2']
