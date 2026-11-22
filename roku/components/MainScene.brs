@@ -141,6 +141,7 @@ sub load()
     m.status.text = "Loading…"
     m.hint.text = ""
     hideAll()
+    if m.task <> invalid then m.task.unobserveField("result")   ' an earlier, abandoned load must not answer
     m.task = CreateObject("roSGNode", "LoadTask")
     m.task.url = m.server + "/api/tv?side=" + LCase(m.lib)
     m.task.observeField("result", "onLoaded")
