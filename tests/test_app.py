@@ -78,6 +78,8 @@ def test_filters(win):
 
 def test_search(win):
     win.search.setText('jungle w')
+    assert win.search_timer.isActive()          # typing waits for a pause before redrawing
+    win.search_timer.timeout.emit()
     assert titles(win) == ['Jungle World']
 
 
@@ -158,22 +160,37 @@ def test_make_a_movie_an_episode(win):
 
 def test_status_shows_port_and_tvs(win):
     win._status()
-    assert f'port {win.srv.port}' in win.status.text() and 'waiting for a TV' in win.status.text()
+    assert f':{win.srv.port}' in win.status.text() or f'port {win.srv.port}' in win.status.text()
+    assert 'waiting for a TV' in win.status.text()
     win.srv.clients['10.0.0.9'] = __import__('time').monotonic()
     win._status()
     assert '1 TV connected' in win.status.text()
 
 
+def free_port():
+    import socket
+    s = socket.socket()
+    s.bind(('0.0.0.0', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def test_settings_change_port_and_skin(win, monkeypatch, tmp_path):
+    port = free_port()
+    warned = []
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: warned.append(a))   # never a modal in a test
+
     def fake_exec(d):
-        d.port.setValue(0 or 18765)
+        d.port.setValue(port)
         d.skin.setCurrentText('Ember')
         return QDialog.Accepted
     monkeypatch.setattr(pa.SettingsDialog, 'exec', fake_exec)
     win.open_settings()
-    assert win.lib.data['skin'] == 'Ember' and win.srv.port == 18765 and win.srv.running
+    assert warned == []
+    assert win.lib.data['skin'] == 'Ember' and win.srv.port == port and win.srv.running
     assert skins.get('Ember')['accent'] in QApplication.instance().styleSheet()
-    assert library.Library(win.lib.dir).data['port'] == 18765
+    assert library.Library(win.lib.dir).data['port'] == port
 
 
 def test_every_skin_applies(qapp):
@@ -187,15 +204,19 @@ def test_unknown_skin_falls_back(qapp):
     assert pa.apply_skin(qapp, 'Plaid')['name'] == 'Blue'
 
 
-def test_close_hides_to_tray(win):
+def test_close_hides_to_tray(win, monkeypatch):
     class Tray:
+        msg = None
+
         def showMessage(self, *a):
             self.msg = a
+    quit_called = []
+    monkeypatch.setattr(pa.QSystemTrayIcon, 'isSystemTrayAvailable', staticmethod(lambda: True))
+    monkeypatch.setattr(QApplication.instance(), 'quit', lambda: quit_called.append(1))
     win.tray = Tray()
     win.show()
     win.close()
-    if pa.QSystemTrayIcon.isSystemTrayAvailable():
-        assert win.isHidden() and win.tray.msg
+    assert win.isHidden() and win.tray.msg and quit_called == []      # still running: the TVs keep playing
 
 
 def test_selection_handler_runs_once_per_change_after_many_refreshes(win, monkeypatch):
@@ -239,7 +260,8 @@ def test_a_real_change_still_refreshes(win, tmp_path):
     v = win.lib.version
     make(str(tmp_path / 'home'), 'Brand New 2020.mkv')
     win.scanner._run()
-    assert win.lib.version == v + 1
+    win._changed()                                 # the queued signal, delivered
+    assert win.lib.version == v + 1 and 'Brand New' in titles(win)
 
 
 def test_multi_select_edit_never_walks_the_disk(win, monkeypatch):
@@ -267,7 +289,12 @@ def test_busy_port_keeps_the_working_server(win, monkeypatch):
 
 
 def test_season_zero_specials(win):
-    assert win.d_season.minimum() == 0
+    pick(win, 'Ann Droid S01E01')
+    win.d_season.setValue(0)
+    win.d_ep.setValue(0)
+    win._apply_episode()
+    it = next(i for i in win.lib.current() if i.get('show') == 'Ann Droid' and i['season'] == 0)
+    assert it['episode'] == 0 and it['title'] == 'Ann Droid S00E00'
 
 
 def test_no_tray_closing_quits(win, monkeypatch):
@@ -317,3 +344,144 @@ def test_plays_on_roku_column_is_about_the_format_only(win, tmp_path):
         rows[win.model.item(r, 0).text()] = (win.model.item(r, 6).text(), win.model.item(r, 6).toolTip())
     assert rows['Ann Droid S01E04'][0] == 'Yes' and 'missing episode 3' in rows['Ann Droid S01E04'][1]
     assert rows['Clip'][0] == 'Check'
+
+
+
+# ------------------------------------------------------------------ baseline fixes, window (B1, B9, B15-B20, B22, B39, B49, B57-B59)
+def test_collection_menu_survives_a_redraw_while_open(win, monkeypatch):
+    ids = [i['id'] for i in win.lib.current() if i['title'].startswith('Jungle')]
+    cid = win.lib.make_collection('JP', ids)
+    set_filter(win, 'collections')
+    opened = []
+    monkeypatch.setattr(win, '_edit_collection', lambda c: opened.append(c))
+
+    class Menu(pa.QMenu):
+        def exec(self, *a):
+            win.refresh()                              # a background change while the menu is open
+            self.actions()[0].trigger()
+    monkeypatch.setattr(pa, 'QMenu', Menu)
+    pos = win.view.visualRect(win.model.index(0, 0)).center()
+    win._menu(pos)
+    assert opened == [cid]
+
+
+def test_reselect_is_one_selection(win, tmp_path):
+    for n in range(400):
+        make(str(tmp_path / 'home'), 'Movie %03d.mkv' % n)
+    win.lib.scan()
+    win.refresh()
+    win.view.selectAll()
+    import time
+    t0 = time.monotonic()
+    win.refresh()
+    assert time.monotonic() - t0 < 3 and len(win.selected_ids()) == len(win.lib.current())
+
+
+def test_set_episode_keeps_a_typed_title_and_leaves_no_title_behind(win):
+    pick(win, 'Conor')
+    win.d_show.click()
+    win.d_showname.setText('Conor Show')
+    win.d_season.setValue(2)
+    win.d_ep.setValue(5)
+    win._apply_episode()
+    it = next(i for i in win.lib.current() if i.get('show') == 'Conor Show')
+    assert it['title'] == 'Conor Show S02E05' and 'title' not in win.lib.data['items'].get(it['id'], {})
+    pick(win, 'Conor Show S02E05')
+    win.d_movie.click()
+    assert win.lib.by_id(it['id'])['title'] == 'Conor'
+
+
+def test_title_box_follows_again_after_enter(win):
+    pick(win, 'Conor')
+    win.d_title.setText('Conor the Barbarian')
+    win.d_title.setModified(True)
+    win.d_title.editingFinished.emit()
+    assert not win.d_title.isModified()
+    fp = win.sel[0]['id']
+    win.lib.set_item(fp, title='Other Name')
+    win.refresh()
+    assert win.d_title.text() == 'Other Name'
+
+
+def test_episode_edit_in_progress_survives_a_redraw(win, tmp_path):
+    from PySide6.QtTest import QTest
+    pick(win, 'Ann Droid S01E01')
+    win.d_showname.clear()
+    QTest.keyClicks(win.d_showname, 'Android')
+    make(str(tmp_path / 'home'), 'Something New 2021.mkv')
+    win.lib.scan()
+    win.refresh()
+    assert win.d_showname.text() == 'Android' and win.ep_box.isVisibleTo(win)
+
+
+def test_shows_view_ignores_capital_letters(win, tmp_path):
+    make(str(tmp_path / 'home'), 'ann droid S01E03.mkv')
+    win.lib.scan()
+    set_filter(win, 'shows')
+    assert win.model.rowCount() == 1 and '3 episodes' in win.model.item(0, 0).text()
+
+
+def test_first_draw_never_scans_on_the_gui_thread(qapp, tmp_path, monkeypatch):
+    make(str(tmp_path / 'home'), 'Heat 1995.mkv')
+    lib = library.Library(str(tmp_path / 'store'))
+    lib.set_folders([{'path': str(tmp_path / 'home')}])
+    calls = []
+    monkeypatch.setattr(lib, 'scan', lambda: calls.append(1))
+    srv = server.PlayServer(lib, port=0, discovery_port=0)
+    w = pa.Window(lib, srv, pa.Scanner(lib))
+    w.timer.stop()
+    assert calls == [] and 'reading your folders' in w.status.text()
+    w.deleteLater()
+
+
+def test_mixed_selection_lights_neither_kind(win):
+    pick(win, 'Conor', 'Ann Droid S01E01')
+    assert not win.d_movie.isChecked() and not win.d_show.isChecked()
+
+
+def test_dialogs_and_menus_are_deleted(win, monkeypatch):
+    from PySide6.QtWidgets import QDialog as D
+    ids = [i['id'] for i in win.lib.current() if i['title'].startswith('Jungle')]
+    cid = win.lib.make_collection('JP', ids)
+    monkeypatch.setattr(pa.CollectionDialog, 'exec', lambda self: D.Rejected)
+    before = len(win.findChildren(pa.CollectionDialog))
+    for _ in range(5):
+        win._edit_collection(cid)
+    qapp = QApplication.instance()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert len(win.findChildren(pa.CollectionDialog)) == before
+
+
+def test_banner_uses_the_word_as_written(win):
+    assert 'start with "Jungle"' in win.banner_text.text()
+
+
+def test_plural():
+    assert pa.plural(1, 'film') == '1 film' and pa.plural(2, 'film') == '2 films' and pa.plural(0, 'TV') == '0 TVs'
+
+
+def test_tray_icon_follows_the_skin(win, monkeypatch):
+    class Tray:
+        icon = None
+
+        def setIcon(self, i):
+            self.icon = i
+    win.tray = Tray()
+    port = win.srv.port
+
+    def fake_exec(d):
+        d.port.setValue(port)
+        d.skin.setCurrentText('Neon')
+        return QDialog.Accepted
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', fake_exec)
+    win.open_settings()
+    assert win.tray.icon is not None
+
+
+def test_status_shows_discovery_and_unreachable_problems(win):
+    win.srv.discovery_error = 'UDP port 8601 is in use'
+    win.lib.unreachable = [r'N:\Media']
+    win._status()
+    t = win.status.text()
+    assert 'UDP port 8601' in t and "Can't reach" in t

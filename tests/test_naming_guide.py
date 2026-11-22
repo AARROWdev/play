@@ -44,3 +44,22 @@ def test_every_table_row_in_the_guide_is_covered():
                'Ann Droid S01E02.mkv', 'Ann Droid - S1E2.mkv', 'Ann.Droid.S01E02.1080p.WEB-DL.mkv',
                'Ann Droid 1x02.mkv', 'Ann Droid Season 1 Episode 2.mkv'}
     assert set(files) == covered
+
+
+
+def test_guide_tables_say_what_the_code_does():
+    """Every '| `file` | expected |' row in NAMING.md, checked against the reader: the guide can't drift."""
+    text = open(GUIDE, encoding='utf-8').read()
+    rows = re.findall(r'^\| `([^`]+)` \| ([^|]+) \|', text, re.M)
+    assert len(rows) >= 9
+    for fname, want in rows:
+        want = want.strip()
+        stem = os.path.splitext(fname)[0]
+        ep = names.episode(os.path.join(r'N:\M', fname), r'N:\M')
+        if ' · ' in want and want.count(' · ') == 2:           # Show · Season · Episode
+            show, s, e = want.split(' · ')
+            assert ep == (show, int(s), int(e)), fname
+        else:                                                   # Title · Year, or Title (no year)
+            title, _, year = want.partition(' · ')
+            title = title.split(' (no year)')[0].strip()
+            assert ep is None and names.movie(stem) == (title, int(year) if year else None), fname
