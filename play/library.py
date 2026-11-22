@@ -59,7 +59,7 @@ def _write_json(path, data):
 
 def _read_json(path, default):
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:     # -sig: a file saved with a BOM (Notepad, PowerShell)
             d = json.load(f)
         return d if isinstance(d, type(default)) else default
     except (OSError, ValueError):

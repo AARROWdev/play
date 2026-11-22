@@ -805,25 +805,42 @@ def apply_skin(app, name):
     return t
 
 
+MUTEX_NAMES = ('PLAYAppMutex', 'Global\\PLAYAppMutex')
+ERROR_ALREADY_EXISTS = 183
+
+
+def already_running(names=MUTEX_NAMES):
+    """Take the PLAY mutexes (held until exit). True if another PLAY already holds them."""
+    import ctypes
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    taken, existed = [], False
+    for n in names:
+        h = k32.CreateMutexW(None, False, n)
+        if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+            existed = True
+        if h:
+            taken.append(h)
+    already_running.handles = getattr(already_running, 'handles', []) + taken
+    return existed
+
+
 def main(argv=None):
     argv = sys.argv if argv is None else argv
     app = QApplication(argv)
     app.setApplicationName(APP)
     app.setQuitOnLastWindowClosed(False)
-    # one PLAY at a time: a second launch just opens the first one's window
-    sock = QLocalSocket()
-    sock.connectToServer(INSTANCE_KEY)
-    if sock.waitForConnected(300):
-        sock.write(b'show')
-        sock.waitForBytesWritten(300)
-        sock.disconnectFromServer()
+    # One PLAY at a time. The mutex says whether PLAY is already running (the uninstaller checks it too); if it is,
+    # this launch asks that copy to show its window and exits, and never starts a second server, even if the
+    # first copy is too busy to answer in time.
+    if already_running():
+        sock = QLocalSocket()
+        sock.connectToServer(INSTANCE_KEY)
+        if sock.waitForConnected(5000):
+            sock.write(b'show')
+            sock.waitForBytesWritten(1000)
+            sock.disconnectFromServer()
         return 0
-    try:   # the uninstaller checks this mutex and asks you to quit PLAY first
-        import ctypes
-        k32 = ctypes.windll.kernel32
-        main.mutex = [k32.CreateMutexW(None, False, n) for n in ('PLAYAppMutex', 'Global\\PLAYAppMutex')]
-    except (AttributeError, OSError):
-        pass
     lib = library.Library()
     t = apply_skin(app, lib.data['skin'])
     app.setWindowIcon(play_icon(t['accent']))

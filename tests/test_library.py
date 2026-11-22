@@ -302,3 +302,8 @@ def test_plain_movies_subfolder_is_not_a_collection(lib, tmp_path):
 def test_folder_kids_flag_must_be_true(tmp_path):
     (tmp_path / 'library.json').write_text('{"folders": [{"path": "D:/media", "kids": "false"}]}')
     assert library.Library(str(tmp_path)).folders[0]['kids'] is False
+
+
+def test_library_json_with_a_bom_is_read(tmp_path):
+    (tmp_path / 'library.json').write_bytes(b'\xef\xbb\xbf{"folders": [{"path": "D:/media", "kids": true}]}')
+    assert library.Library(str(tmp_path)).folders == [{'path': 'D:/media', 'kids': True}]
