@@ -182,3 +182,84 @@ def test_import_old_config(tmp_path):
 def test_bad_store_file_starts_clean(tmp_path):
     (tmp_path / 'library.json').write_text('not json')
     assert library.Library(str(tmp_path)).folders == []
+
+
+# ------------------------------------------------------------------ review fixes (1348321)
+@pytest.mark.parametrize('stem,title,year', [
+    ('The Extended Family 2019', 'The Extended Family', 2019),
+    ('Blade Runner 2049', 'Blade Runner 2049', None),
+    ('Heat.1995.EXTENDED.1080p.BluRay', 'Heat', 1995),
+    ('Proper Behaviour 2014 PROPER', 'Proper Behaviour', 2014),
+])
+def test_junk_words_only_trail(stem, title, year):
+    assert names.movie(stem) == (title, year)
+
+
+def test_repack_before_episode_marker():
+    assert names.episode(r'N:\M\Show.REPACK.S01E02.mkv', r'N:\M') == ('Show', 1, 2)
+
+
+def test_kids_tag_follows_a_file_out_of_the_kids_folder(lib, tmp_path):
+    ts = find(lib, 'Toy Shelf')
+    os.rename(ts['path'], str(tmp_path / 'home' / 'Toy Shelf.mp4'))
+    lib.scan()
+    assert lib.by_id(ts['id'])['kids'] is True
+    assert 'Toy Shelf' in [m['title'] for m in lib.tv_view(kids=True)['movies']]
+
+
+def test_untagging_kids_in_a_kids_folder_sticks(lib):
+    ts = find(lib, 'Toy Shelf')
+    lib.set_item(ts['id'], kids=False)
+    lib.scan()
+    assert lib.by_id(ts['id'])['kids'] is False
+    assert library.Library(lib.dir).by_id(ts['id'])['kids'] is False
+
+
+def test_same_file_in_home_and_kids_is_kids(lib, tmp_path):
+    src = find(lib, 'Conor The Barbarian')['path']
+    make(str(tmp_path / 'kids'), 'Conor.mkv', open(src, 'rb').read())
+    assert find(lib, 'Conor The Barbarian')['kids'] is True
+
+
+def test_episode_title_follows_edited_numbers(lib):
+    ep = find(lib, 'Ann Droid S01E01')
+    lib.set_item(ep['id'], show='Android', episode=7)
+    it = lib.by_id(ep['id'])
+    assert it['title'] == 'Android S01E07'
+    tv = lib.tv_view()['shows']
+    assert any(s['name'] == 'Android' and s['seasons'][0]['episodes'][0]['title'] == 'Android S01E07' for s in tv)
+    lib.set_item(ep['id'], title='Pilot')
+    assert lib.by_id(ep['id'])['title'] == 'Pilot'
+
+
+def test_unknown_ids_rescan_at_most_every_10s(lib, monkeypatch):
+    lib.scan()
+    calls = []
+    monkeypatch.setattr(lib, 'scan', lambda: calls.append(1))
+    for _ in range(20):
+        assert lib.path_for('0123456789abcdef') is None
+    assert calls == []
+
+
+def test_bad_value_types_in_store_files(tmp_path):
+    (tmp_path / 'library.json').write_text('{"items": {"a": 5, "b": {"kids": true}}, "collections": {"x": 3, '
+                                           '"y": {"name": 1}}, "dismissed": [1, "toy"], "folders": "nope"}')
+    (tmp_path / 'fingerprints.json').write_text('{"k": 7, "j": [1, 2]}')
+    lb = library.Library(str(tmp_path))
+    assert lb.data['items'] == {'b': {'kids': True}} and lb.data['collections'] == {}
+    assert lb.data['dismissed'] == ['toy'] and lb.fpcache == {} and lb.folders == []
+    lb.scan()
+
+
+def test_empty_collection_is_not_made(lib):
+    assert lib.make_collection('Nothing', []) is None and lib.data['collections'] == {}
+
+
+def test_subfolder_is_offered_as_collection(lib, tmp_path):
+    for rel in ['Alien 1979.mkv', 'Aliens 1986.mkv', 'Prometheus 2012.mkv']:
+        make(str(tmp_path / 'home' / 'Alien Saga'), rel)
+    sug = next(s for s in lib.suggestions() if s['key'].startswith('folder:'))
+    assert sug['name'] == 'Alien Saga' and len(sug['members']) == 3
+    assert not any(s['key'] == 'alien' for s in lib.suggestions())
+    lib.dismiss(sug['key'])
+    assert not any(s['key'].startswith('folder:') for s in lib.suggestions())

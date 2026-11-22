@@ -32,6 +32,10 @@ def fingerprint(path, size):
     return h.hexdigest()[:16]
 
 
+def _dict(v):
+    return v if isinstance(v, dict) else {}
+
+
 def _write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
@@ -61,11 +65,15 @@ class Library:
             'folders': [f for f in d.get('folders', []) if isinstance(f, dict) and f.get('path')],
             'port': int(d.get('port', 8600)) if str(d.get('port', '')).isdigit() else 8600,
             'skin': d.get('skin', 'Blue'),
-            'items': d.get('items', {}) if isinstance(d.get('items'), dict) else {},
-            'collections': d.get('collections', {}) if isinstance(d.get('collections'), dict) else {},
-            'dismissed': d.get('dismissed', []) if isinstance(d.get('dismissed'), list) else [],
+            'items': {k: v for k, v in _dict(d.get('items')).items() if isinstance(v, dict)},
+            'collections': {k: v for k, v in _dict(d.get('collections')).items()
+                            if isinstance(v, dict) and isinstance(v.get('name'), str)
+                            and isinstance(v.get('members'), list)},
+            'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
+                         if isinstance(d.get('dismissed'), list) else [],
         }
-        self.fpcache = _read_json(self.cache_path, {})
+        self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
+                        if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._items = []
         self._scanned = 0
         self.version = 0          # bumps on every scan or change; the UI and the server compare it
@@ -100,7 +108,7 @@ class Library:
     # ------------------------------------------------------------------ scanning
     def scan(self):
         with self.lock:
-            found, cache_dirty, live = {}, False, set()
+            found, cache_dirty, live, tagged = {}, False, set(), False
             for folder in self.data['folders']:
                 root = folder['path']
                 for dirpath, dirs, files in os.walk(root):
@@ -126,21 +134,37 @@ class Library:
                                 continue
                             self.fpcache[key] = [st.st_size, st.st_mtime_ns, fp]
                             cache_dirty = True
+                        if folder.get('kids') and self._tag_kids_once(fp):
+                            tagged = True
+                            if fp in found:
+                                found[fp]['kids'] = True
                         if fp in found:            # the same file twice (a copy): list it once
                             found[fp]['copies'] = found[fp].get('copies', 1) + 1
                             continue
-                        found[fp] = self._item(fp, p, root, folder.get('kids', False), ext, st.st_size)
+                        found[fp] = self._item(fp, p, root, ext, st.st_size)
             stale = [k for k in self.fpcache if k not in live]
             for k in stale:
                 del self.fpcache[k]
             if cache_dirty or stale:
                 _write_json(self.cache_path, self.fpcache)
+            if tagged:
+                self.save()
             self._items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
                                                                 i.get('episode') or 0))
             self._mark_problems()
             self._scanned = time.monotonic()
             self.version += 1
             return self._items
+
+    def _tag_kids_once(self, fp):
+        """A file first seen in a Kids folder gets a stored Kids tag, so it stays Kids if moved. Untagging it in the
+        app sticks: the 'seen' mark stops it being tagged again."""
+        ov = self.data['items'].setdefault(fp, {})
+        if ov.get('kids_folder_seen'):
+            return False
+        ov['kids_folder_seen'] = True
+        ov['kids'] = True
+        return True
 
     def items(self, max_age=5.0):
         """The current item list, rescanning when older than max_age seconds."""
@@ -149,17 +173,27 @@ class Library:
                 self.scan()
             return self._items
 
-    def by_id(self, fp):
+    def by_id(self, fp, max_age=5.0):
         with self.lock:
-            for i in self.items():
+            for i in self.items(max_age):
                 if i['id'] == fp:
                     return i
         return None
 
-    def _item(self, fp, path, root, kids_folder, ext, size):
+    def path_for(self, fp, rescan=True):
+        """The file to stream for an id, from the last scan. An unknown id rescans at most every 10 seconds, so
+        requests for made-up ids can't keep the disks busy."""
+        with self.lock:
+            it = self.by_id(fp, max_age=3600)
+            if not it and rescan and time.monotonic() - self._scanned > 10:
+                self.scan()
+                it = self.by_id(fp, max_age=3600)
+            return it['path'] if it else None
+
+    def _item(self, fp, path, root, ext, size):
         fmt = names.VIDEO_EXTS[ext]
         it = {'id': fp, 'path': path, 'file': os.path.basename(path), 'folder': root, 'format': fmt, 'size': size,
-              'roku_ok': fmt in names.ROKU_OK, 'kids': bool(kids_folder), 'hidden': False}
+              'roku_ok': fmt in names.ROKU_OK, 'kids': False, 'hidden': False}
         ep = names.episode(path, root)
         if ep:
             it.update(kind='episode', show=ep[0], season=ep[1], episode=ep[2], year=None,
@@ -177,6 +211,10 @@ class Library:
             it['kind'] = 'movie'                 # an override that turned it into an episode without the details
         if it['kind'] == 'movie':
             it['show'] = it['season'] = it['episode'] = None
+        elif 'title' not in ov:                  # the TV title follows an edited show / season / episode
+            it['title'] = f"{it['show']} S{it['season']:02d}E{it['episode']:02d}"
+        it['kids'] = bool(it['kids'])
+        it['hidden'] = bool(it['hidden'])
         it['collection'] = self._collection_of(fp)
         return it
 
@@ -223,7 +261,7 @@ class Library:
                     ov.pop(k, None)
                 else:
                     ov[k] = v
-            if ov:
+            if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
                 self.data['items'][fp] = ov
             else:
                 self.data['items'].pop(fp, None)
@@ -232,6 +270,8 @@ class Library:
 
     def make_collection(self, name, members, order='year'):
         with self.lock:
+            if not members:
+                return None
             cid = uuid.uuid4().hex[:8]
             self._take(members)
             self.data['collections'][cid] = {'name': name.strip() or 'Collection', 'order': order,
@@ -292,13 +332,27 @@ class Library:
     def suggestions(self):
         """Groups of 2+ loose movies sharing a first word ('Jungle ...'), not yet dismissed."""
         with self.lock:
+            loose = [i for i in self.items() if i['kind'] == 'movie' and not i['collection'] and not i['hidden']]
+            out, covered = [], set()
+            # a subfolder holding 2+ movies ('Jungle Park/...') is offered as a collection named after the folder
+            by_dir = {}
+            for i in loose:
+                d = os.path.dirname(i['path'])
+                if os.path.normcase(d) != os.path.normcase(i['folder']):
+                    by_dir.setdefault(d, []).append(i)
+            for d, g in sorted(by_dir.items()):
+                key = 'folder:' + os.path.normcase(d)
+                if len(g) < 2 or key in self.data['dismissed']:
+                    continue
+                g.sort(key=lambda i: (i.get('year') or 9999, names.sort_key(i['title'])))
+                out.append({'key': key, 'name': names.clean(os.path.basename(d)) or g[0]['title'],
+                            'members': [i['id'] for i in g]})
+                covered.update(i['id'] for i in g)
             groups = {}
-            for i in self.items():
-                if i['kind'] == 'movie' and not i['collection'] and not i['hidden']:
-                    w = names.family_word(i['title'])
-                    if w:
-                        groups.setdefault(w, []).append(i)
-            out = []
+            for i in loose:
+                w = names.family_word(i['title'])
+                if w and i['id'] not in covered:
+                    groups.setdefault(w, []).append(i)
             for w, g in sorted(groups.items()):
                 if len(g) < 2 or w in self.data['dismissed']:
                     continue

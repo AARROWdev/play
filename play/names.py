@@ -1,4 +1,5 @@
 """Reading movie and episode details from file names. Pure functions, no file access."""
+import datetime
 import os
 import re
 
@@ -7,10 +8,12 @@ VIDEO_EXTS = {'.mkv': 'mkv', '.mp4': 'mp4', '.m4v': 'mp4', '.mov': 'mov', '.avi'
 # Containers the Roku player opens. Others are listed but flagged; the codecs inside still matter (see the guide).
 ROKU_OK = {'mkv', 'mp4', 'mov', 'ts'}
 
-# Release junk that ends a title: quality, source, codec, audio, group tags.
-_JUNK = re.compile(r'\b(2160p|1080[pi]|720p|480p|4k|uhd|hdr10?|dv|blu-?ray|bdrip|brrip|web-?dl|web-?rip|webrip|hdtv|dvdrip|'
-                   r'remux|x26[45]|h\.?26[45]|hevc|avc|aac|ac3|dts|ddp?5\.1|atmos|proper|repack|extended|unrated|'
-                   r'imax|10bit)\b.*$', re.I)
+# Release junk. A strong tag (resolution, source, codec) ends the title wherever it appears; the weak words below
+# are real words too ("The Extended Family"), so they are only dropped when they trail the title.
+_STRONG = re.compile(r'\b(2160p|1080[pi]|720p|480p|4k|uhd|blu-?ray|bdrip|brrip|web-?dl|web-?rip|hdtv|dvdrip|remux|'
+                     r'x26[45]|h\.?26[45]|hevc|10bit)\b.*$', re.I)
+_WEAK = re.compile(r'(?:\s+(?:hdr10?|dv|avc|aac|ac3|dts|ddp?5\.1|atmos|proper|repack|extended|unrated|imax|'
+                   r'internal|limited))+\s*$', re.I)
 _YEAR = re.compile(r'(?:^|[\s(\[])((?:19|20)\d\d)(?:[\s)\]]|$)')
 # Episode forms, tried in order. Each captures (show, season, episode) where present.
 _EP_FORMS = [
@@ -26,15 +29,17 @@ def clean(stem):
     """'Jungle.Park.1993.1080p.BluRay' -> 'Jungle Park 1993'. Keeps the year, drops release junk."""
     s = re.sub(r'[._]+', ' ', stem)
     s = re.sub(r'\[[^\]]*\]', ' ', s)                 # [group] tags
-    s = _JUNK.sub('', s)
+    s = _STRONG.sub('', s)
     s = re.sub(r'\s+', ' ', s).strip(' -')
+    s = _WEAK.sub('', ' ' + s).strip(' -')
     return s
 
 
 def movie(stem):
     """(title, year or None) for a movie file name without extension."""
     s = clean(stem)
-    years = list(_YEAR.finditer(s))
+    latest = datetime.date.today().year + 1      # 'Blade Runner 2049' has no year
+    years = [y for y in _YEAR.finditer(s) if 1900 <= int(y.group(1)) <= latest]
     if years:
         y = years[-1]
         before = s[:y.start(1)].strip(' -([')
@@ -79,6 +84,7 @@ def _show_from_dirs(path, root):
 
 
 def _tidy_show(show):
+    show = _WEAK.sub('', ' ' + clean(show)).strip(' -')   # 'Show REPACK' -> 'Show'
     t, y = movie(show)          # 'Ann Droid (2026)' -> 'Ann Droid'
     return t or show
 
@@ -98,14 +104,3 @@ def family_word(title):
     if words and len(words[0]) >= 3 and not words[0].isdigit():
         return words[0]
     return None
-
-
-def common_prefix_words(titles):
-    split = [re.findall(r"[A-Za-z0-9':]+", t) for t in titles]
-    out = []
-    for group in zip(*split):
-        if len({w.lower().rstrip(':') for w in group}) == 1:
-            out.append(group[0].rstrip(':'))
-        else:
-            break
-    return ' '.join(out)
