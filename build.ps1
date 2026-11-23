@@ -30,10 +30,12 @@ Invoke-Step 'PyInstaller' {
     & $py -m PyInstaller --noconfirm --windowed --name PLAY --icon "$PSScriptRoot\assets\play.ico" `
         --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick `
         --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtMultimedia `
+        --add-data "$PSScriptRoot\roku;roku" `
         --distpath build\dist --workpath build\work --specpath build play_main.py
 }
 $app = 'build\dist\PLAY'
 if (-not (Test-Path "$app\PLAY.exe")) { throw 'PyInstaller produced no PLAY.exe' }
+if (-not (Test-Path "$app\_internal\roku\manifest")) { throw 'the TV app is missing from the build (Set up TVs needs it)' }
 Copy-Item README.md, LICENSE, NAMING.md $app
 
 $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source

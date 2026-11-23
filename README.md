@@ -24,8 +24,11 @@ the files straight from your drives to the TVs in your house.
    the folder or folders your movies and shows are in. PLAY lives in the tray and starts with Windows (from its first
    start, for your Windows user; Settings switches it off), so the TVs can
    always reach it.
-2. **On the Roku:** add the PLAY channel (see the release notes for the channel link), open it, and pick HOME or KIDS.
-   It finds the PC on its own.
+2. **On the Roku:** in PLAY's window click **Set up TVs** (also in the tray menu). It finds the Roku TVs on your
+   network and says what each one needs. Once per TV you turn on Roku's Developer Mode with the remote (the wizard
+   shows the button presses) and set a developer password; then one click puts PLAY on the TV, and it finds the PC
+   on its own. Open PLAY on the TV and pick HOME or KIDS. Run Set up TVs again any time to add a TV or update the
+   TV app. (A Roku holds one developer app at a time: installing PLAY replaces any other one; the wizard asks.)
 
 The app isn't code-signed yet, so Windows may show "Windows protected your PC": click **More info**, then
 **Run anyway**. The installer lets PLAY through Windows Firewall on private networks only: if the TV can't find

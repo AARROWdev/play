@@ -348,6 +348,11 @@ class Window(QMainWindow):
         self.rail.setCurrentRow(0)
         self.rail.currentItemChanged.connect(self._filter_changed)
         v.addWidget(self.rail)
+        t = QPushButton('Set up TVs')
+        t.setObjectName('chip')
+        t.setToolTip('Find the Roku TVs on your network and put PLAY on them')
+        t.clicked.connect(self.open_tv_setup)
+        v.addWidget(t)
         s = QPushButton('Settings')
         s.setObjectName('chip')
         s.clicked.connect(self.open_settings)
@@ -874,6 +879,11 @@ class Window(QMainWindow):
         if self.sel:
             subprocess.Popen(['explorer', '/select,', os.path.normpath(self.sel[0]['path'])])
 
+    def open_tv_setup(self):
+        from .tvsetup import TvSetupDialog
+        self.bring_up()
+        run_dialog(TvSetupDialog(self, self.lib, self.srv))
+
     def open_settings(self, first_run=False):
         d = SettingsDialog(self, self.lib, first_run)
         accepted = d.exec() == QDialog.Accepted
@@ -1101,6 +1111,7 @@ def main(argv=None):
     tray.setToolTip('PLAY')
     menu = QMenu()
     menu.addAction('Open library', w.bring_up)
+    menu.addAction('Set up TVs…', w.open_tv_setup)
     menu.addAction('Restart server', w.restart_server)
     menu.addSeparator()
     menu.addAction('Quit PLAY', app.quit)
