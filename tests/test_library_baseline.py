@@ -1283,6 +1283,7 @@ def test_an_unplugged_second_copy_keeps_the_title(tmp_path):
     assert alien['copies'] == 2
     os.rename(str(usb), str(tmp_path / 'unplugged'))
     assert titles_now(lb) == ['Alien', 'Heat']
+    assert not next(i for i in lb.current() if i['title'] == 'Alien').get('copies')   # USB folder away: 1 here
     os.remove(str(media / 'Alien 1979.mkv'))          # "2 copies": the user deletes one
     assert titles_now(lb) == ['Alien', 'Heat']        # the other is on the unplugged drive
     assert not next(i for i in lb.current() if i['title'] == 'Alien').get('copies')
@@ -1316,6 +1317,10 @@ def test_a_copy_that_plays_beats_one_on_an_unplugged_drive(tmp_path):
     alien = next(i for i in lb.current() if i['title'] == 'Alien')
     assert alien['path'] == str(backup / 'Alien 1979.mkv') and os.path.exists(alien['path'])
     assert not alien.get('copies')                  # the unplugged one isn't counted while it's away
+    os.rename(str(tmp_path / 'unplugged'), str(usb))   # plugged back in
+    lb.scan()
+    alien = next(i for i in lb.current() if i['title'] == 'Alien')
+    assert alien['copies'] == 2 and alien['path'] == str(media / 'USB' / 'Alien 1979.mkv')
 
 
 def test_a_failed_readlink_offline_keeps_the_remembered_target(tmp_path, monkeypatch):
@@ -1325,17 +1330,50 @@ def test_a_failed_readlink_offline_keeps_the_remembered_target(tmp_path, monkeyp
     make(str(media), 'Heat 1995.mkv', b'heat' * 50)
     _junction(media / 'Films', nas)
     films = os.path.normcase(str(media / 'Films'))
+    real_readlink, real_realpath = library.os.readlink, library.os.path.realpath
     lb = library.Library(str(tmp_path / 'store'))
-    lb.set_folders([{'path': str(media)}])
-    lb.items(0)
-    remembered = lb._links[films]
+    lb.set_folders([{'path': str(media)}, {'path': str(nas)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
     os.rename(str(nas), str(tmp_path / 'asleep'))
-    real_readlink = library.os.readlink
 
-    def readlink(p):
+    def readlink(p):                                # offline the link can't be read now
         if os.path.normcase(str(p)) == films:
             raise OSError('cannot read the link now')
         return real_readlink(p)
+
+    def realpath(p, *a, **k):                       # and realpath can only give the mapped-drive spelling
+        return r'Z:\Movies' if os.path.normcase(str(p)) == films else real_realpath(p, *a, **k)
     monkeypatch.setattr(library.os, 'readlink', readlink)
+    monkeypatch.setattr(library.os.path, 'realpath', realpath)
     lb.scan()
-    assert lb._links[films] == remembered
+    lb.set_folders([{'path': str(media)}])           # the NAS folder is removed from Settings while it sleeps
+    assert titles_now(lb) == ['Alien', 'Heat']
+
+
+def test_a_link_first_read_without_its_raw_target_isnt_taken_as_repointed(tmp_path, monkeypatch):
+    nas = tmp_path / 'NAS'
+    make(str(nas), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', nas)
+    films = os.path.normcase(str(media / 'Films'))
+    real_readlink, real_realpath = library.os.readlink, library.os.path.realpath
+
+    def readlink(p):                                # online once without an answer, offline it answers
+        if os.path.normcase(str(p)) == films and os.path.isdir(str(nas)):
+            raise OSError('busy')
+        return r'Z:\Movies' if os.path.normcase(str(p)) == films else real_readlink(p)
+
+    def realpath(p, *a, **k):
+        if os.path.normcase(str(p)) == films and not os.path.isdir(str(nas)):
+            return r'Z:\Movies'
+        return real_realpath(p, *a, **k)
+    monkeypatch.setattr(library.os, 'readlink', readlink)
+    monkeypatch.setattr(library.os.path, 'realpath', realpath)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(nas)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(nas), str(tmp_path / 'asleep'))
+    lb.scan()
+    lb.set_folders([{'path': str(media)}])
+    assert titles_now(lb) == ['Alien', 'Heat']

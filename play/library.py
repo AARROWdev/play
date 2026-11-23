@@ -559,10 +559,10 @@ class Library:
         # beats a remembered one (on a drive that's unplugged, it wouldn't play), and only files read now are
         # counted as copies (one kept from before may be the very file read here under another name).
         kept = self._kept
-        for walked in (True, False):
+        for walked in ((True, False) if kept else (True,)):
             for f, root in folders:
                 for fp, path, ext, size, _real_w, real in self._raw.get(root, []):
-                    if ((fp, path) not in kept) != walked:
+                    if kept and ((fp, path) not in kept) != walked:
                         continue
                     kids = f.get('kids') or (kids_into and (real in kids_into or real.startswith(kids_pre)))
                     if kids and self._tag_kids_once(fp):
@@ -1010,7 +1010,8 @@ def _walk(root, skip_roots, sc, root_real_w=None):
                     # resolved to online). The same raw target as when it was online: the same place as then (the
                     # merge after the walks keeps that). A different one: the link was re-pointed, go by it.
                     old = sc.old_links.get(lkey)
-                    if real is not None and (old is None or (raw_t is not None and old[2] != raw_t)):
+                    repointed = raw_t is not None and old is not None and old[2] is not None and old[2] != raw_t
+                    if real is not None and (old is None or repointed):
                         links[lkey] = (path, real, raw_t)
                     continue
                 links[lkey] = (path, real, raw_t)
