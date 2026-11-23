@@ -864,21 +864,25 @@ def test_set_up_tvs_is_one_dialog_and_opens_again(win, monkeypatch):
 
 
 def test_new_collection_is_always_there_and_uses_the_selection(win, monkeypatch):
-    shown = []
-    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: shown.append(d))
-    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: shown.append('told'))
-    win.sel = []
-    win.new_collection()                            # nothing selected: says how, makes nothing
-    assert shown == ['told'] and not win.lib.data['collections']
-    films = [i for i in win.lib._items if i['kind'] == 'movie'][:3]
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    button = next(b for b in win.findChildren(pa.QPushButton) if b.text() == 'New collection…')
+    win.view.clearSelection()
+    button.click()                                  # nothing selected: says how, makes nothing
+    assert told and not win.lib.data['collections']
+    win.filter = 'all'
+    win.refresh()
+    films = [i for i in win.lib._items if i['kind'] == 'movie' and i['title'].startswith('Jungle')]
+    win._reselect([i['id'] for i in films])         # the real rows, selected in the view
     episode = next(i for i in win.lib._items if i['kind'] == 'episode')
-    win.sel = films + [episode]
+    win._reselect([episode['id']])
+    win._sel_changed()
     monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Comedy', True))
-    win.new_collection()
+    told.clear()
+    button.click()
     (c,) = win.lib.data['collections'].values()
     assert c['name'] == 'Comedy' and sorted(c['members']) == sorted(i['id'] for i in films)   # films only
-    assert any(isinstance(d, pa.CollectionDialog) for d in shown)
-    assert any(b.text() == 'New collection…' for b in win.findChildren(pa.QPushButton))   # it's on screen
+    assert any('episode' in t for t in told)        # and it says the episode was left out
 
 
 def test_new_collection_cancelled_makes_nothing(win, monkeypatch):
@@ -935,7 +939,7 @@ def test_add_media_moves_the_files_into_the_default_folder(win, tmp_path, monkey
     win.add_media()
     assert not list(downloads.iterdir())                                     # moved, not copied
     assert os.path.exists(os.path.join(default, 'Up 2009.mkv'))
-    assert os.path.exists(os.path.join(default, 'Heat 1995 (2).mkv'))        # nothing overwritten
+    assert os.path.exists(os.path.join(default, 'Heat 1995 [2].mkv'))        # nothing overwritten
     up = library.fingerprint(os.path.join(default, 'Up 2009.mkv'), 1000)
     assert win.lib.data['items'][up]['kids'] is True
 
@@ -963,3 +967,111 @@ def test_the_panel_on_the_right_shows_only_with_a_selection(win):
     win._detail_for([win.lib._items[0]])
     assert win.detail_pane.isVisible()
     win.hide()
+
+
+
+# ------------------------------------------------------------------ de8c9f7 review
+def _films(win, n=None):
+    fs = [i for i in win.lib._items if i['kind'] == 'movie']
+    return fs[:n] if n else fs
+
+
+def test_taking_films_out_of_a_collection_asks_first(win, monkeypatch):
+    films = _films(win, 3)
+    marvel = win.lib.make_collection('Marvel', [films[0]['id'], films[1]['id']])
+    asked = []
+    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: asked.append(text) or False)
+    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Action', True))
+    win.sel = films
+    win.new_collection()
+    assert 'Marvel' in asked[0] and 'removed' in asked[0]                   # it would be left empty
+    assert set(win.lib.data['collections']) == {marvel}                     # said no: nothing changed
+
+
+def test_the_collection_dropdown_asks_too(win, monkeypatch):
+    films = _films(win, 2)
+    win.lib.make_collection('Marvel', [films[0]['id']])
+    asked = []
+    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: asked.append(text) or False)
+    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Action', True))
+    win.sel = films
+    win.d_col.addItem('New collection…', '__new__')
+    win.d_col.setCurrentIndex(win.d_col.count() - 1)
+    win._col_picked(0)
+    assert asked and 'Marvel' in asked[0]
+
+
+def test_an_existing_name_adds_to_that_collection(win, monkeypatch):
+    films = _films(win, 2)
+    comedy = win.lib.make_collection('Comedy', [films[0]['id']])
+    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: True)
+    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('comedy ', True))
+    win.sel = [films[1]]
+    win.new_collection()
+    assert list(win.lib.data['collections']) == [comedy]                    # no second "Comedy"
+    assert win.lib.data['collections'][comedy]['members'] == [films[0]['id'], films[1]['id']]
+
+
+def test_only_episodes_selected_says_why(win, monkeypatch):
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    win.sel = [i for i in win.lib._items if i['kind'] == 'episode']
+    win.new_collection()
+    assert "Episodes can't go in a collection" in told[0] and not win.lib.data['collections']
+
+
+
+# ------------------------------------------------------------------ 1a25fcb review
+def test_the_progress_window_cant_be_closed_mid_move(qapp):
+    dlg = pa._Progress('Adding media', None, 0, 2)
+    dlg.show()
+    dlg.reject()                                    # Esc
+    assert dlg.isVisible()
+    dlg.job_done = True
+    dlg.reject()
+    assert not dlg.isVisible()
+
+
+def test_nothing_else_starts_while_files_move(win, monkeypatch):
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a))
+    opened = []
+    monkeypatch.setattr(pa, 'SettingsDialog', lambda *a, **k: opened.append(1))
+    quit_called = []
+    monkeypatch.setattr(QApplication.instance(), 'quit', lambda: quit_called.append(1))
+    win.moving = True
+    win.open_settings()
+    win.open_tv_setup()
+    win.add_media()
+    win.quit_app()
+    assert len(told) == 4 and opened == [] and quit_called == []
+    win.moving = False
+
+
+def test_a_default_folder_that_cant_be_opened_is_said(win, monkeypatch, tmp_path):
+    warned = []
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: warned.append(a[2]))
+    src = tmp_path / 'x' / 'Up 2009.mkv'
+    make(str(src.parent), src.name)
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(src)], ''))
+    monkeypatch.setattr(pa.QMessageBox, 'exec', lambda box: pa.QMessageBox.Yes)
+    monkeypatch.setattr(pa.os, 'makedirs', lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, 'denied')))
+    win.add_media()
+    assert warned and src.exists()
+
+
+def test_a_renamed_default_folder_isnt_made_again(win, monkeypatch, tmp_path):
+    gone = tmp_path / 'Renamed'
+    d = pa.SettingsDialog(win, win.lib)
+    d.folders.clear()
+    d._add_row(str(gone))
+    d._mark_default()
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', lambda self: QDialog.Accepted)
+    monkeypatch.setattr(pa, 'SettingsDialog', lambda *a, **k: d)
+    win.open_settings()
+    assert not gone.exists()                        # reported as not found, not quietly recreated
+
+
+def test_the_videos_folder_comes_from_windows():
+    assert os.path.basename(library.default_folder_path()) == 'PLAY'
+    assert os.path.isabs(library.videos_folder())

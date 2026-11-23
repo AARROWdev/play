@@ -61,11 +61,37 @@ def run_dialog(d, *args):
         d.deleteLater()
 
 
+def ask(parent, title, text):
+    """Yes/No, No by default, the text shown as plain text."""
+    box = QMessageBox(QMessageBox.Question, title, text, QMessageBox.Yes | QMessageBox.No, parent)
+    box.setTextFormat(Qt.PlainText)
+    box.setDefaultButton(QMessageBox.No)
+    try:
+        return box.exec() == QMessageBox.Yes
+    finally:
+        box.deleteLater()
+
+
+class _Progress(QProgressDialog):
+    """A progress window that stays until its job is done: Esc and the close box do nothing (a move can't be
+    half-cancelled from here)."""
+    job_done = False
+
+    def reject(self):
+        if self.job_done:
+            super().reject()
+
+    def closeEvent(self, e):
+        if self.job_done:
+            super().closeEvent(e)
+        else:
+            e.ignore()
+
+
 def run_with_progress(parent, title, job, total):
     """job(progress) in a worker thread, with a progress window meanwhile (the window stays responsive).
     progress(i, total, name) updates it. Returns job's result."""
-    import threading
-    dlg = QProgressDialog(title, None, 0, total, parent)
+    dlg = _Progress(title, None, 0, total, parent)
     dlg.setWindowTitle(title)
     dlg.setMinimumDuration(0)
     dlg.setWindowModality(Qt.WindowModal)
@@ -86,6 +112,7 @@ def run_with_progress(parent, title, job, total):
         dlg.setLabelText(f'{title}: {state["name"]}')
         QApplication.processEvents()
         t.join(0.05)
+    dlg.job_done = True
     dlg.setValue(total)
     dlg.deleteLater()
     if 'error' in box:
@@ -189,7 +216,7 @@ class SettingsDialog(QDialog):
         self.kids_was = {os.path.normcase(f['path']): f.get('kids') is True for f in lib.folders}
         paths = [f['path'] for f in lib.folders] or ([library.default_folder_path()] if first_run else [])
         for p in paths:
-            self.folders.addItem(p)
+            self._add_row(p)
         self._mark_default()
         v.addWidget(self.folders)
         row = QHBoxLayout()
@@ -240,18 +267,22 @@ class SettingsDialog(QDialog):
     def _paths(self):
         return [self.folders.item(i).data(Qt.UserRole) for i in range(self.folders.count())]
 
+    def _add_row(self, path):
+        it = QListWidgetItem(path)
+        it.setData(Qt.UserRole, path)
+        self.folders.addItem(it)
+
     def _mark_default(self):
         """The first folder is the default: it says so."""
         for i in range(self.folders.count()):
             it = self.folders.item(i)
-            path = it.data(Qt.UserRole) or it.text()
-            it.setData(Qt.UserRole, path)
+            path = it.data(Qt.UserRole)
             it.setText(f'{path}   (default: new media goes here)' if i == 0 else path)
 
     def _add(self):
         d = QFileDialog.getExistingDirectory(self, 'Add a media folder')
         if d:
-            self.folders.addItem(os.path.normpath(d))
+            self._add_row(os.path.normpath(d))
             self._mark_default()
 
     def _remove(self):
@@ -800,11 +831,8 @@ class Window(QMainWindow):
         if not editing_ep:
             self._ep_dirty_for = None
             self.ep_box.setVisible(len(its) == 1 and its[0]['kind'] == 'episode')
-        if not on:
-            self.d_heading.setText('Nothing selected')
+        if not on:                                      # (the panel is hidden)
             self.d_title.clear()
-            self.d_file.setText('Pick a title to change how it shows on the TV.')
-            self.d_problems.clear()
             self.d_col.clear()
             return
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
@@ -893,16 +921,54 @@ class Window(QMainWindow):
         cid = self.d_col.currentData()
         ids = [i['id'] for i in self.sel]
         if cid == '__new__':
-            name, ok = QInputDialog.getText(self, 'New collection', 'Name on the TV:',
-                                            text=self.sel[0]['title'] if self.sel else '')
-            if ok and name.strip():
-                self.lib.make_collection(name, ids)
+            self._create_collection(self.sel, self.sel[0]['title'] if len(self.sel) == 1 else '')
         elif cid is None:
             self.lib.remove_from_collections(ids)
-        else:
+        elif self._moves_ok(ids, into=cid):
             c = self.lib.data['collections'][cid]
             self.lib.update_collection(cid, members=c['members'] + [i for i in ids if i not in c['members']])
         self.refresh()
+
+    def _moves_ok(self, ids, into=None):
+        """A film is in one collection at a time: putting these in a collection takes them out of the others.
+        Say which, and which would be left empty (and so removed); True to go ahead."""
+        ids, lines = set(ids), []
+        for cid, c in sorted(self.lib.data['collections'].items(), key=lambda kv: names.sort_key(kv[1]['name'])):
+            if cid == into:
+                continue
+            out = [m for m in c['members'] if m in ids]
+            if out:
+                left = len(c['members']) - len(out)
+                lines.append(f'{c["name"]}: {plural(len(out), "film")} move out' +
+                             (' and it will be removed (nothing left in it)' if not left else ''))
+        if not lines:
+            return True
+        return ask(self, 'Collections', 'These films are in other collections now:\n\n' + '\n'.join(lines) +
+                   '\n\nGo ahead?')
+
+    def _create_collection(self, films, name=''):
+        """Name a collection for these films (the one place both "New collection" paths go through). A name that
+        exists already offers to add them to that collection instead of making a second one."""
+        ids = [i['id'] for i in films]
+        prompt = f'Name on the TV for these {len(films)} films:' if len(films) > 1 else 'Name on the TV:'
+        name, ok = QInputDialog.getText(self, 'New collection', prompt, text=name)
+        name = (name or '').strip()
+        if not ok or not name:
+            return None
+        same = next((cid for cid, c in self.lib.data['collections'].items()
+                     if c['name'].strip().casefold() == name.casefold()), None)
+        if same:
+            if not ask(self, 'New collection', f'There is already a collection called {name}. Add these films '
+                                               f'to it?'):
+                return None
+            if not self._moves_ok(ids, into=same):
+                return None
+            c = self.lib.data['collections'][same]
+            self.lib.update_collection(same, members=c['members'] + [i for i in ids if i not in c['members']])
+            return same
+        if not self._moves_ok(ids):
+            return None
+        return self.lib.make_collection(name, ids)
 
     def _dismiss(self):
         if self.suggestion:
@@ -911,6 +977,8 @@ class Window(QMainWindow):
 
     def add_media(self):
         """Pick video files and move them into the default folder (optionally marked Kids)."""
+        if self.busy():
+            return
         folder = self.lib.default_folder
         if not folder:
             QMessageBox.information(self, 'Add media', 'First add a media folder in Settings.')
@@ -932,32 +1000,54 @@ class Window(QMainWindow):
             kids = kids.isChecked()
         finally:
             box.deleteLater()
-        os.makedirs(folder, exist_ok=True)
-        moved, failed = run_with_progress(self, 'Adding media', lambda progress:
-                                          media.move_files(paths, folder, progress), len(paths))
-        if kids and moved:
-            self.lib.mark_kids([fp for _, fp in moved])
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
+            return
+        roots = [f['path'] for f in self.lib.folders]
+        self.moving = True                             # meanwhile Settings, Set up TVs, Add media and Quit wait
+        try:
+            moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.move_files(
+                paths, folder, roots, progress, fingerprints=kids), len(paths))
+        finally:
+            self.moving = False
+        if kids:
+            fps = [fp for _, fp in moved if fp]
+            if fps:
+                self.lib.mark_kids(fps)
         self.scanner.kick()
         if failed:
-            QMessageBox.warning(self, 'Add media', 'These could not be moved:\n' +
+            QMessageBox.warning(self, 'Add media', 'These were not moved:\n' +
                                 '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
 
+    def busy(self):
+        """Files are being moved: say so (True) rather than start something else meanwhile."""
+        if getattr(self, 'moving', False):
+            QMessageBox.information(self, 'PLAY', 'PLAY is moving files into your media folder. Wait until it\'s '
+                                    'done.')
+            return True
+        return False
+
+    def quit_app(self):
+        if not self.busy():
+            QApplication.instance().quit()
+
     def new_collection(self):
-        """A collection of the selected films, named by you. Shows on the TV as one entry."""
+        """A collection of the selected films, named by you. Shows on the TV as one entry. (Its order and name
+        can be changed later: double-click it under Collections.)"""
         films = [i for i in self.sel if i['kind'] == 'movie']
+        episodes = len(self.sel) - len(films)
         if not films:
-            QMessageBox.information(self, 'New collection', 'Select the films for it first (Ctrl-click or '
-                                    'Shift-click to pick several), then click New collection.')
+            QMessageBox.information(self, 'New collection', (
+                'Episodes can\'t go in a collection (a show is already one entry on the TV). ' if episodes else '') +
+                'Select the films for it first (Ctrl-click or Shift-click to pick several), then click New collection.')
             return
-        name, ok = QInputDialog.getText(self, 'New collection', f'Name on the TV for these {len(films)} films:'
-                                        if len(films) > 1 else 'Name on the TV:')
-        if not ok or not name.strip():
-            return
-        cid = self.lib.make_collection(name, [i['id'] for i in films])
+        if episodes:
+            QMessageBox.information(self, 'New collection', f'{plural(episodes, "episode")} left out: episodes '
+                                    'can\'t go in a collection (a show is already one entry on the TV).')
+        self._create_collection(films)
         self.refresh()
-        if cid:
-            run_dialog(CollectionDialog(self, self.lib, cid))
-            self._changed()
 
     def _make_suggested(self):
         s = self.suggestion
@@ -995,6 +1085,8 @@ class Window(QMainWindow):
 
     def open_tv_setup(self):
         from .tvsetup import TvSetupDialog
+        if self.busy():
+            return
         self.bring_up()
         d = getattr(self, '_tv_setup', None)
         if d is not None and d.isVisible():            # already open (the tray, while it's showing): bring it up
@@ -1011,6 +1103,8 @@ class Window(QMainWindow):
             d.release()
 
     def open_settings(self, first_run=False):
+        if self.busy():
+            return
         d = SettingsDialog(self, self.lib, first_run)
         accepted = d.exec() == QDialog.Accepted
         if not accepted and self.srv.port != self.lib.data['port']:
@@ -1022,7 +1116,9 @@ class Window(QMainWindow):
             d.deleteLater()
         if not accepted:
             return
-        if folders and not os.path.isdir(folders[0]['path']):
+        if folders and not os.path.isdir(folders[0]['path']) and \
+                os.path.normcase(os.path.abspath(folders[0]['path'])) == \
+                os.path.normcase(os.path.abspath(library.default_folder_path())):
             try:                                       # the default folder (Videos\\PLAY at first): make it
                 os.makedirs(folders[0]['path'], exist_ok=True)
             except OSError as e:
@@ -1245,7 +1341,7 @@ def main(argv=None):
     menu.addAction('Set up TVs…', w.open_tv_setup)
     menu.addAction('Restart server', w.restart_server)
     menu.addSeparator()
-    menu.addAction('Quit PLAY', app.quit)
+    menu.addAction('Quit PLAY', w.quit_app)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda r: r == QSystemTrayIcon.Trigger and w.bring_up())
     w.tray = tray

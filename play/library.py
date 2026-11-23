@@ -38,9 +38,32 @@ def default_store_dir():
     return os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'PLAY')
 
 
+def videos_folder():
+    """The user's Videos folder, wherever it is (moved, or in OneDrive); ~/Videos if Windows won't say."""
+    try:
+        import ctypes
+        import uuid as _uuid
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD),
+                        ('Data4', ctypes.c_ubyte * 8)]
+        u = _uuid.UUID('18989B1D-99B5-455B-841C-AB7C74E4DDFC')            # FOLDERID_Videos
+        g = GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+        out = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
+            try:
+                return out.value
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(out)
+    except (OSError, AttributeError):
+        pass
+    return os.path.join(os.path.expanduser('~'), 'Videos')
+
+
 def default_folder_path():
-    """The media folder a new PLAY starts with: Videos\\PLAY in the user's profile."""
-    return os.path.join(os.path.expanduser('~'), 'Videos', 'PLAY')
+    """The media folder a new PLAY starts with: PLAY in the user's Videos folder."""
+    return os.path.join(videos_folder(), 'PLAY')
 
 
 def fingerprint(path, size):
@@ -232,6 +255,9 @@ class Library:
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._raw = {}             # normcased root -> [(fp, path, ext, size, real as written, real normcased)]
+        # Kids folders saved by an older PLAY: they tag their files once more, then become ordinary folders
+        self._legacy_kids = {os.path.normcase(os.path.abspath(f['path'])) for f in self.data['folders']
+                             if f.get('kids')}
         self._into = {}            # normcased root -> real folders of other media folders it reaches (links,
                                    # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
@@ -498,6 +524,15 @@ class Library:
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
+                # Kids is marked per title now: a Kids folder from older settings has just tagged its files
+                # (once each, as before); from here on it is an ordinary folder, so a film added there later isn't
+                # Kids unless it's marked
+                for f in self.data['folders']:
+                    root = os.path.normcase(os.path.abspath(f['path']))
+                    if f.get('kids') and root in reached and root in self._legacy_kids:
+                        self._legacy_kids.discard(root)   # (its files were tagged by a rebuild already:
+                        f['kids'] = False                   # the first scan always rebuilds)
+                        self._save_after_scan = True
                 self._gen += 1
                 self._scanned = time.monotonic()     # after the rebuild: readers never see "scanned" but empty
                 save, self._save_after_scan = self._save_after_scan, False

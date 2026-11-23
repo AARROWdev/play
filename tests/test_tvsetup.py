@@ -1409,3 +1409,7 @@ def test_each_tv_says_how_to_check_its_address_on_the_tv(qapp, tmp_path, monkeyp
         select(d, ip)
         text = d.detail.text()
         assert 'Settings › Network › About' in text and f'<b>{ip}</b>' in text
+    d.tv['10.0.0.6']['status'] = tvsetup.OFFLINE                            # not answering: no such line
+    select(d, '10.0.0.5')
+    select(d, '10.0.0.6')
+    assert 'Settings › Network › About' not in d.detail.text()
