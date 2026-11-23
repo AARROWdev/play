@@ -1377,3 +1377,19 @@ def test_a_link_first_read_without_its_raw_target_isnt_taken_as_repointed(tmp_pa
     lb.scan()
     lb.set_folders([{'path': str(media)}])
     assert titles_now(lb) == ['Alien', 'Heat']
+
+
+# ------------------------------------------------------------------ 90aa7e3 review
+def test_a_film_on_two_unplugged_folders_stays_with_the_first(tmp_path):
+    usb1, usb2, media = tmp_path / 'USB1', tmp_path / 'USB2', tmp_path / 'Media'
+    make(str(usb1), 'Alien 1979.mkv')
+    make(str(usb2), 'Alien 1979.mkv')
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(usb1)}, {'path': str(usb2), 'kids': True}])
+    lb.items(0)
+    os.rename(str(usb1), str(tmp_path / 'away1'))
+    os.rename(str(usb2), str(tmp_path / 'away2'))
+    lb.scan()
+    alien = next(i for i in lb.current() if i['title'] == 'Alien')
+    assert alien['path'] == str(usb1 / 'Alien 1979.mkv')      # the first folder in Settings, as when found
