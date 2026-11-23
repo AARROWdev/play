@@ -1376,3 +1376,24 @@ def test_a_re_ask_the_dialog_closed_before_is_kept(qapp, tmp_path, monkeypatch):
     d.closing = True                                # closed between the result and the scheduled re-ask
     d._retry('10.0.0.6')
     assert d.tv['10.0.0.6'].get('ask_again')
+
+
+
+# ------------------------------------------------------------------ 9a98fcd review
+def test_a_typed_unusable_password_keeps_a_good_stored_one(qapp, tmp_path, monkeypatch):
+    class Unusable(FakeNet):
+        def install(self, ip, pw, data):
+            raise roku.UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:good'})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Unusable({'10.0.0.6': {
+        'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    answers = iter([('sécret', True), ('', False)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    d.tv['10.0.0.6'].update(status=tvsetup.FAILED, msg='x', pw_problem=True)
+    d._retry('10.0.0.6')                            # the retry prompt: a typed password, unusable
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and d.tv['10.0.0.6'].get('msg') != 'x')
+    QApplication.processEvents()
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:good'}   # a typed one never forgets it

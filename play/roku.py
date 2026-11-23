@@ -201,7 +201,9 @@ class _Deadline:
         self.uploaded = False                  # the latest request: a body, with a password, went out in full
 
     def left(self):
-        return max(0.05, self.end - time.monotonic())   # (within() starts an inner call no later than the outer)
+        # (near the end an inner call can be given up to 0.05 s past the outer one: connect's over() checks the
+        # whole chain, so no connection starts once any of them is out of time)
+        return max(0.05, self.end - time.monotonic())
 
     def over(self):
         """Time is up for this call, or for a call it runs inside (the watchdog may not have said so yet)."""
