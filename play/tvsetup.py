@@ -77,6 +77,7 @@ class TvSetupDialog(QDialog):
         self.setWindowTitle('Set up TVs')
         self.resize(720, 440)
         self.tv = {}                                   # ip -> {'status', 'info', 'app', 'msg'}
+        self.gen = {}                                  # ip -> the latest check or install started for it
         self.searching = False
         self.active = 0                                # workers still running (the dialog outlives them)
         self.closing = False
@@ -176,13 +177,17 @@ class TvSetupDialog(QDialog):
                 self._check(ip)
         self._details()
 
+    def _next(self, ip):
+        self.gen[ip] = self.gen.get(ip, 0) + 1
+        return self.gen[ip]
+
     def _check(self, ip):
         self.tv[ip] = {'status': CHECKING, 'info': self.tv.get(ip, {}).get('info'), 'app': None, 'msg': ''}
         self._row(ip)
-        self._run(self._check_worker, ip, ip in self.srv.tvs())
+        self._run(self._check_worker, ip, ip in self.srv.tvs(), self._next(ip))
 
-    def _check_worker(self, ip, talks_to_play):
-        st = {'info': None, 'app': None, 'msg': ''}
+    def _check_worker(self, ip, talks_to_play, gen=0):
+        st = {'info': None, 'app': None, 'msg': '', 'gen': gen}
         try:
             st['info'] = self.net.info(ip)
             if not st['info']['dev_mode']:
@@ -205,13 +210,15 @@ class TvSetupDialog(QDialog):
         self.bus.state.emit(ip, st)
 
     def _set(self, ip, st):
+        if st.get('gen', self.gen.get(ip, 0)) != self.gen.get(ip, 0):
+            return                                      # a check or install that something newer replaced
         if self.tv.get(ip, {}).get('status') == INSTALLING and not st.get('install'):
-            return                                      # a check that started before the install: out of date
+            return
         wrong = st.get('wrong')
         if 'pw' in st or wrong:
             _after_install(self, ip, st)
             st = {k: v for k, v in st.items() if k not in ('pw', 'wrong')}
-        st = {k: v for k, v in st.items() if k != 'install'}
+        st = {k: v for k, v in st.items() if k not in ('install', 'gen')}
         cur = self.tv.setdefault(ip, {'status': CHECKING, 'info': None, 'app': None, 'msg': ''})
         cur.update(st)
         self._row(ip)
@@ -344,15 +351,22 @@ class TvSetupDialog(QDialog):
         self.tv[ip].update(status=INSTALLING, msg='')
         self._row(ip)
         self._details()
-        self._run(self._install_worker, ip, pw)
+        self._run(self._install_worker, ip, pw, self._next(ip))
 
-    def _install_worker(self, ip, pw):
-        st = {'install': True}
+    def _install_worker(self, ip, pw, gen=0):
+        st = {'install': True, 'gen': gen}
         try:
             st['msg'] = self.net.install(ip, pw, self.net.package())
             st['status'] = DONE
             st['app'] = (roku.APP_TITLE, roku.app_version())   # what's on the TV now
             st['pw'] = pw
+        except roku.TookTooLong as e:
+            st['status'] = FAILED
+            if e.uploaded:                              # it got the whole app: likely installed, password fine
+                st['pw'] = pw
+                st['msg'] = 'The TV took too long to say how it went. PLAY may already be on the TV: open it there.'
+            else:
+                st['msg'] = str(e)
         except roku.WrongPassword:
             st['status'], st['wrong'] = FAILED, True
             st['msg'] = 'The TV didn\'t accept that password.'

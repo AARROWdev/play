@@ -503,7 +503,8 @@ def test_a_request_that_trickles_along_is_cut_off(monkeypatch):
             roku._get(f'http://127.0.0.1:{srv.server_address[1]}/query/device-info')
         assert time.monotonic() - t < 2                                      # cut off at the deadline, in place
         time.sleep(0.2)
-        assert not [th for th in threading.enumerate() if th.name == 'play-deadline' and th.is_alive()]
+        assert roku._watchdog.pending == []                                    # nothing left to watch
+        assert len([th for th in threading.enumerate() if th.name == 'play-deadline']) <= 1   # one, shared
     finally:
         srv.shutdown()
     assert roku.within(1, lambda: 'ok') == 'ok'
@@ -721,3 +722,77 @@ def test_a_check_that_started_before_an_install_doesnt_undo_it(qapp, tmp_path, m
     assert d.tv['10.0.0.6']['status'] == tvsetup.INSTALLING
     d._set('10.0.0.6', {'install': True, 'status': tvsetup.DONE, 'msg': 'ok'})              # the install's own
     assert d.tv['10.0.0.6']['status'] == tvsetup.DONE
+
+
+
+# ------------------------------------------------------------------ 0661768 review
+def test_a_check_that_lands_after_an_install_doesnt_undo_it(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
+                                                                    'app': ('', '')}})
+    old = d._next('10.0.0.6')                       # a check starts ...
+    new = d._next('10.0.0.6')                       # ... then an install
+    d._set('10.0.0.6', {'install': True, 'gen': new, 'status': tvsetup.DONE, 'msg': 'ok'})
+    d._set('10.0.0.6', {'gen': old, 'status': tvsetup.READY, 'info': None, 'app': None, 'msg': ''})   # late
+    assert d.tv['10.0.0.6']['status'] == tvsetup.DONE
+
+
+def test_connecting_counts_against_the_time(monkeypatch):
+    seen = []
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: seen.append(self.timeout))
+    monkeypatch.setattr(roku._Deadline, 'add', lambda self, sock: None)
+    roku.within(0.5, lambda: roku._Connection('127.0.0.1', 9, timeout=120).connect())
+    assert seen and seen[0] <= 0.5
+
+
+def test_odd_password_challenges_are_explained(tv, monkeypatch):
+    for header in ('NTLM', ''):
+        def challenge(self, stale=False, header=header):
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', header)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+        monkeypatch.setattr(FakeInstaller, '_challenge', challenge)
+        with pytest.raises(OSError, match='recognise'):
+            roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_a_call_that_finishes_in_time_leaves_nothing_behind():
+    assert roku.within(5, lambda: 'ok') == 'ok'
+    assert roku._watchdog.pending == []
+    d = roku._Deadline(0)
+    d.done = True
+    d.expire()
+    assert not d.expired                            # a finished call is never cut off afterwards
+
+
+def test_a_call_inside_a_call_gives_the_outer_deadline_back():
+    def outer():
+        before = roku._current.deadline
+        roku.within(5, lambda: None)
+        return roku._current.deadline is before
+    assert roku.within(5, outer) is True
+
+
+def test_the_tvs_own_answer_at_the_limit_isnt_called_too_long():
+    def refuse():
+        time.sleep(0.3)
+        raise urllib.error.HTTPError('http://tv/', 401, 'no', {}, None)
+    with pytest.raises(urllib.error.HTTPError):
+        roku.within(0.1, refuse)
+
+
+def test_an_install_cut_off_after_the_upload_keeps_the_password(qapp, tmp_path, monkeypatch):
+    class Late(FakeNet):
+        def install(self, ip, pw, data):
+            raise roku.TookTooLong('The TV took too long to answer', uploaded=True)
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    net = Late({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    assert 'may already be on the TV' in d.detail.text()
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}

@@ -172,15 +172,26 @@ def _read(r):
         chunks.append(chunk)
 
 
+class TookTooLong(OSError):
+    """The time was up. uploaded: the app had already gone to the TV in full (it may be installed)."""
+
+    def __init__(self, msg, uploaded=False):
+        super().__init__(msg)
+        self.uploaded = uploaded
+
+
 class _Deadline:
-    """The connections one call opens, shut down when its time is up: whatever the call is doing (sending the app,
+    """The connections one call opens, closed when its time is up: whatever the call is doing (sending the app,
     waiting for headers, reading a reply that trickles in) fails at once, in the call's own thread. Nothing goes on
     in the background afterwards."""
 
     def __init__(self, seconds):
-        self.lock, self.socks, self.expired = threading.Lock(), [], False
-        self.timer = threading.Timer(seconds, self.expire)
-        self.timer.daemon, self.timer.name = True, 'play-deadline'
+        self.lock, self.socks, self.expired, self.done = threading.Lock(), [], False, False
+        self.end = time.monotonic() + seconds
+        self.uploaded = False                  # a request body went out in full
+
+    def left(self):
+        return max(0.05, self.end - time.monotonic())
 
     def add(self, sock):
         with self.lock:
@@ -191,15 +202,66 @@ class _Deadline:
 
     def expire(self):
         with self.lock:
+            if self.done:
+                return
             self.expired = True
             for s in self.socks:
                 _hard_close(s)
 
 
+class _Watchdog:
+    """One thread for every deadline (not one per call): it sleeps until the soonest one, and expires it unless
+    its call finished first."""
+
+    def __init__(self):
+        self.cond, self.pending, self.thread = threading.Condition(), [], None
+
+    def watch(self, deadline):
+        with self.cond:
+            self.pending.append(deadline)
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._run, name='play-deadline', daemon=True)
+                self.thread.start()
+            self.cond.notify()
+
+    def finished(self, deadline):
+        with self.cond:
+            with deadline.lock:
+                deadline.done = True
+            if deadline in self.pending:
+                self.pending.remove(deadline)
+            self.cond.notify()
+
+    def _run(self):
+        with self.cond:
+            while True:
+                now = time.monotonic()
+                for d in [d for d in self.pending if d.end <= now]:
+                    self.pending.remove(d)
+                    d.expire()
+                if self.pending:
+                    self.cond.wait(min(d.end for d in self.pending) - now)
+                else:
+                    self.cond.wait(60)
+                    if not self.pending:         # nothing to watch for a minute: the thread ends
+                        self.thread = None
+                        return
+
+
+_watchdog = _Watchdog()
+
+
 def _hard_close(sock):
-    """Close a socket now, even while another thread waits on it. On Windows neither shutdown() nor close() wakes a
-    waiting read while the socket's reader (makefile) still holds it; closing the handle itself does. The socket
-    object lets go of the handle first, so it can't close it again later (by then it may be someone else's)."""
+    """Close a socket now, from the watchdog, while its call may be waiting on it. On Windows a waiting read is
+    woken by neither shutdown() nor close() while the socket's reader (makefile) still holds it; closing the
+    handle itself does, and that is what Windows documents for cancelling a blocking call. The socket object lets
+    go of the handle first (detach), so its owner can't use or close that number again afterwards: any further
+    call on it fails at once. What remains is a call already inside Windows on that handle, which Windows ends
+    with an error."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
     try:
         fd = sock.detach()
     except OSError:
@@ -216,10 +278,18 @@ _current = threading.local()            # the deadline of the call running in th
 
 class _Connection(http.client.HTTPConnection):
     def connect(self):
-        super().connect()
         deadline = getattr(_current, 'deadline', None)
+        if deadline is not None:               # connecting counts too: no longer than the time left
+            self.timeout = min(self.timeout, deadline.left()) if self.timeout else deadline.left()
+        super().connect()
         if deadline is not None:
             deadline.add(self.sock)
+
+    def request(self, method, url, body=None, headers={}, **kw):
+        super().request(method, url, body, headers, **kw)
+        deadline = getattr(_current, 'deadline', None)
+        if deadline is not None and body:
+            deadline.uploaded = True
 
 
 class _DeadlineHTTP(urllib.request.HTTPHandler):
@@ -232,20 +302,24 @@ _DIRECT = opener()
 
 def within(seconds, fn, *args):
     """fn(*args), given `seconds` in all: connecting, sending, the answer's headers and body. A request that
-    trickles along (a byte at a time stays under every per-step timeout) is cut off by shutting its connections,
-    so it can't hold a worker, or the wizard waiting for it, and nothing of it carries on."""
+    trickles along (a byte at a time stays under every per-step timeout) is cut off by closing its connections,
+    so it can't hold a worker, or the wizard waiting for it, and nothing of it carries on. Raises TookTooLong
+    for what the cut-off caused (an answer the TV gave in time, like a 401, is passed on as it is)."""
     deadline = _Deadline(seconds)
+    outer = getattr(_current, 'deadline', None)
     _current.deadline = deadline
-    deadline.timer.start()
+    _watchdog.watch(deadline)
     try:
         return fn(*args)
-    except Exception as e:
+    except urllib.error.HTTPError:
+        raise                                  # the TV's own answer
+    except (OSError, http.client.HTTPException) as e:
         if deadline.expired:
-            raise OSError('The TV took too long to answer') from e
+            raise TookTooLong('The TV took too long to answer', deadline.uploaded) from e
         raise
     finally:
-        deadline.timer.cancel()
-        _current.deadline = None
+        _watchdog.finished(deadline)
+        _current.deadline = outer
 
 
 def _get(url, timeout=4):
@@ -334,10 +408,7 @@ def _authorization(handler, url, timeout):
             return None
     except OSError:                                   # no answer to the GET: let the POST find out
         return None
-    try:
-        auth = handler.get_authorization(urllib.request.Request(url, method='POST'), chal)
-    except (ValueError, KeyError, TypeError):
-        return None
+    auth = handler.get_authorization(urllib.request.Request(url, method='POST'), chal)   # (errors: install's)
     return f'Digest {auth}' if auth else None
 
 
@@ -380,7 +451,7 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e
         raise OSError(f'The TV answered {e.code}') from e
-    except (KeyError, ValueError) as e:          # a password challenge urllib can't use (no nonce, say)
+    except (KeyError, ValueError, IndexError, TypeError) as e:   # a password challenge urllib can't parse
         raise OSError("The TV asked for its password in a way PLAY doesn't recognise") from e
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
     msg = ' '.join(m.strip() for m in msgs if m.strip())
