@@ -199,7 +199,7 @@ class Library:
                 key = os.path.normcase(os.path.abspath(f['path']))
                 if key not in seen:                   # 'N:\Media' and 'N:\MEDIA\' are one folder
                     seen.add(key)
-                    folders.append({'path': f['path'], 'kids': f.get('kids') is True})
+                    folders.append({'path': os.path.abspath(f['path']), 'kids': f.get('kids') is True})
         self.data = {
             'version': 1,
             'folders': folders,
@@ -213,9 +213,8 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
-            'unreadable_since': {k: float(v) for k, v in _dict(d.get('unreadable_since')).items()
-                                 if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
-                                 and math.isfinite(v)},
+            'unreadable_since': {k: _finite(v) for k, v in _dict(d.get('unreadable_since')).items()
+                                 if isinstance(k, str) and _finite(v) is not None},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")
@@ -336,10 +335,11 @@ class Library:
             with self.lock:
                 since = dict(self.data['unreadable_since'])
             for f, root in zip(folders, roots):
-                others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
+                # media folders inside this one, with where they really are (None: not known, it's offline)
+                others = {r: real_of.get(r) for r in roots
+                          if r != root and r.startswith(root.rstrip(os.sep) + os.sep)}
                 files, ok, changed, errs, off, into[root] = _walk(
                     f['path'], others, cache, pending, new_pending, first, real_roots, real_of.get(root), by_real, listings)
-                off = [o for o in off if os.path.normcase(o) not in roots]   # a media folder of its own: its walk says
                 dirty = dirty or changed
                 if ok:
                     # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
@@ -372,13 +372,17 @@ class Library:
             # forget a path once it reads again. Kept: one still failing, one inside something this scan couldn't
             # read (an offline link, an unlistable folder), and one whose media folder wasn't reached (NAS asleep);
             # dropped: one in no media folder any more.
-            failing = set(all_errs)
+            lost_set = set(all_errs)
+            lost_pre = tuple(x.rstrip(os.sep) + os.sep for x in lost_set)
+            deepest_first = sorted(((r, r.rstrip(os.sep) + os.sep) for r in set(roots)), key=lambda x: -len(x[0]))
 
             def keep_clock(p):
-                if p in failing or _under(p, all_errs):
+                if p in lost_set or p.startswith(lost_pre):
                     return True
-                mine = [r for r in roots if _under(p, [r])]
-                return bool(mine) and max(mine, key=len) not in reached
+                for r, pre in deepest_first:         # the media folder that holds it
+                    if p == r or p.startswith(pre):
+                        return r not in reached
+                return False
             since = {p: t for p, t in since.items() if keep_clock(p)}
             with self.lock:
                 self.fpcache = cache
@@ -752,6 +756,17 @@ class Library:
             return {'movies': movies, 'shows': show_list}
 
 
+def _finite(v):
+    """v as a finite float, or None (a bool, a string, Infinity, or a number too big for a float)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        v = float(v)
+    except (OverflowError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
 def _under(key, roots):
     return any(key == r or key.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
@@ -790,7 +805,8 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
     walk has already been through, or another media folder (which is walked on its own), is skipped, so a link
     back up the tree can't loop and nothing is listed twice by one walk. 'real' is the file's real location, so a
     file reached by two paths isn't counted as two copies. A link whose target is offline keeps its titles.
-    Folders that are their own media folder (skip_roots) are left to their own walk. A new file waits until it has
+    Folders that are their own media folder (skip_roots: normcased path -> real location or None) are left
+    to their own walk, links among them too (never looked at here). A new file waits until it has
     looked the same for SETTLE seconds (still copying?), except at startup when it was last written over a minute
     ago; a known file that was only re-stamped (same size) is re-read at once; a changed size or time means a fresh
     fingerprint."""
@@ -828,6 +844,10 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             if _dir_link(e):
                 if e.name.startswith('.') or e.name.lower() == '$recycle.bin':
                     continue                       # '.snapshots', '.backup': not media
+                if os.path.normcase(path) in skip_roots:   # a media folder of its own: its walk reads (or misses) it
+                    if skip_roots[os.path.normcase(path)]:
+                        into_roots.append(skip_roots[os.path.normcase(path)])
+                    continue
                 try:
                     real = os.path.normcase(os.path.realpath(path))
                     os.stat(path)
@@ -853,7 +873,7 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
                 key = os.path.normcase(path)
                 sub_real = os.path.join(d_real, os.path.normcase(e.name))
                 if key in skip_roots:              # a media folder of its own inside this one
-                    into_roots.append(sub_real)
+                    into_roots.append(skip_roots[key] or sub_real)
                     continue
                 if d_real != os.path.normcase(d) and (sub_real in visited or sub_real in other_roots):
                     if sub_real in other_roots:    # under a link: another media folder, which walks it

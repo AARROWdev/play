@@ -83,7 +83,7 @@ def test_unparseable_settings_without_backup_start_empty_but_keep_the_file(tmp_p
 
 def test_utf16_settings_file_is_read(tmp_path):
     (tmp_path / 'library.json').write_bytes(json.dumps({'folders': [{'path': 'D:/m'}]}).encode('utf-16'))
-    assert library.Library(str(tmp_path)).folders == [{'path': 'D:/m', 'kids': False}]
+    assert library.Library(str(tmp_path)).folders == [{'path': os.path.abspath('D:/m'), 'kids': False}]
 
 
 def test_lone_surrogate_name_doesnt_break_saving(lib, tmp_path):
@@ -773,3 +773,79 @@ def test_an_offline_media_folder_link_is_named_once(tmp_path):
     lb.scan()
     assert len([u for u in lb.unreachable if u.lower().endswith('films')]) == 1
     assert not any(k.endswith('films') for k in lb.data['unreadable_since'])
+
+
+
+# ------------------------------------------------------------------ 894cf49 review
+def test_a_huge_number_in_the_settings_doesnt_stop_play(tmp_path):
+    (tmp_path / 'library.json').write_text('{"unreadable_since": {"a": 1' + '0' * 400 + ', "b": 7}}',
+                                           encoding='utf-8')
+    assert library.Library(str(tmp_path)).data['unreadable_since'] == {'b': 7.0}
+
+
+def test_an_offline_link_that_is_also_a_media_folder_keeps_its_titles(tmp_path):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    _junction(root / 'Films', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Films')}])
+    assert sorted(i['title'] for i in lb.items(0)) == ['Alien', 'Heat']
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    assert sorted(i['title'] for i in lb.current()) == ['Alien', 'Heat']
+
+
+def _locked_scandir(monkeypatch):
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith('Locked'):
+            raise PermissionError('denied')
+        return real(p)
+    monkeypatch.setattr(library.os, 'scandir', scandir)
+
+
+def test_a_clock_under_a_link_that_goes_offline_is_kept(tmp_path, monkeypatch):
+    other = tmp_path / 'Other'
+    make(str(other / 'Locked'), 'x.mkv')
+    make(str(other), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    _junction(root / 'More', other)
+    _locked_scandir(monkeypatch)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    lb.items(0)
+    locked = [k for k in lb.data['unreadable_since'] if k.endswith('locked')]
+    assert locked
+    os.rename(str(other), str(tmp_path / 'gone'))
+    lb.scan()
+    assert all(k in lb.data['unreadable_since'] for k in locked)
+
+
+def test_a_clock_in_a_nested_media_folder_that_is_away_is_kept(tmp_path, monkeypatch):
+    movies = tmp_path / 'Movies'
+    make(str(movies), 'Heat 1995.mkv')
+    make(str(movies / '4K' / 'Locked'), 'x.mkv')
+    make(str(movies / '4K'), 'Alien 1979.mkv')
+    _locked_scandir(monkeypatch)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(movies)}, {'path': str(movies / '4K')}])
+    lb.items(0)
+    locked = dict(lb.data['unreadable_since'])
+    assert locked
+    os.rename(str(movies / '4K'), str(tmp_path / 'away'))
+    lb.scan()
+    assert lb.data['unreadable_since'] == locked
+
+
+def test_a_media_folder_with_a_trailing_slash_in_the_settings(tmp_path):
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    (tmp_path / 's').mkdir()
+    (tmp_path / 's' / 'library.json').write_text(json.dumps({'folders': [{'path': str(root) + '\\\\'}]}),
+                                                 encoding='utf-8')
+    lb = library.Library(str(tmp_path / 's'))
+    assert lb.folders[0]['path'] == str(root)
