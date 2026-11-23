@@ -12,9 +12,9 @@ from . import roku, server
 
 IP = Qt.UserRole
 
-CHECKING, OFFLINE, BLOCKED, NO_DEV, READY, OTHER, INSTALLED, OLDER, INSTALLING, DONE, FAILED = (
+CHECKING, OFFLINE, BLOCKED, NO_DEV, READY, OTHER, INSTALLED, OLDER, INSTALLING, DONE, FAILED, UNSURE = (
     'checking', 'offline', 'blocked', 'no_dev', 'ready', 'other', 'installed', 'older', 'installing', 'done',
-    'failed')
+    'failed', 'unsure')
 
 STATUS = {
     CHECKING: 'Checking…',
@@ -28,6 +28,7 @@ STATUS = {
     INSTALLING: 'Installing…',
     DONE: 'Installed',
     FAILED: 'Install didn\'t work',
+    UNSURE: 'No answer from the TV',
 }
 
 DEV_STEPS = (
@@ -212,8 +213,6 @@ class TvSetupDialog(QDialog):
     def _set(self, ip, st):
         if st.get('gen', self.gen.get(ip, 0)) != self.gen.get(ip, 0):
             return                                      # a check or install that something newer replaced
-        if self.tv.get(ip, {}).get('status') == INSTALLING and not st.get('install'):
-            return
         wrong = st.get('wrong')
         if 'pw' in st or wrong:
             _after_install(self, ip, st)
@@ -286,11 +285,13 @@ class TvSetupDialog(QDialog):
             DONE: f'<b>Done.</b> PLAY is opening on {name}. It finds this PC by itself.',
             FAILED: f'<b>That didn\'t work:</b> {html.escape(t.get("msg") or "")}<br>Check the TV is on, '
                     'Developer Mode is on, and try again.',
+            UNSURE: f'<b>PLAY was sent to {name}, but the TV didn\'t say how it went.</b> Look on the TV: if PLAY '
+                    'opened, it\'s installed. If not, click <b>Install again</b>.',
         }
         self.detail.setText(texts[s])
-        labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall'}
+        labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall', UNSURE: 'Install again'}
         self.go.setText(labels.get(s, 'Install on this TV'))
-        self.go.setEnabled(s in (READY, OTHER, INSTALLED, OLDER, BLOCKED, DONE, FAILED))
+        self.go.setEnabled(s in (READY, OTHER, INSTALLED, OLDER, BLOCKED, DONE, FAILED, UNSURE))
         self.again.setEnabled(not self.searching)
 
     # ------------------------------------------------------------------ adding and installing
@@ -361,12 +362,9 @@ class TvSetupDialog(QDialog):
             st['app'] = (roku.APP_TITLE, roku.app_version())   # what's on the TV now
             st['pw'] = pw
         except roku.TookTooLong as e:
-            st['status'] = FAILED
-            if e.uploaded:                              # it got the whole app: likely installed, password fine
-                st['pw'] = pw
-                st['msg'] = 'The TV took too long to say how it went. PLAY may already be on the TV: open it there.'
-            else:
-                st['msg'] = str(e)
+            # the app was sent, with the password, but no answer came: it may or may not be on the TV. Nothing
+            # says the password worked, so it isn't kept.
+            st['status'], st['msg'] = (UNSURE if e.uploaded else FAILED), str(e)
         except roku.WrongPassword:
             st['status'], st['wrong'] = FAILED, True
             st['msg'] = 'The TV didn\'t accept that password.'

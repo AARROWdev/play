@@ -173,7 +173,8 @@ def _read(r):
 
 
 class TookTooLong(OSError):
-    """The time was up. uploaded: the app had already gone to the TV in full (it may be installed)."""
+    """The time was up. uploaded: the app had been sent in full, with a password, before it was (so it may or may
+    not be on the TV: nothing says whether the TV took it)."""
 
     def __init__(self, msg, uploaded=False):
         super().__init__(msg)
@@ -186,9 +187,9 @@ class _Deadline:
     in the background afterwards."""
 
     def __init__(self, seconds):
-        self.lock, self.socks, self.expired, self.done = threading.Lock(), [], False, False
+        self.lock, self.socks, self.expired = threading.Lock(), [], False
         self.end = time.monotonic() + seconds
-        self.uploaded = False                  # a request body went out in full
+        self.uploaded = False                  # the latest request: a body, with a password, went out in full
 
     def left(self):
         return max(0.05, self.end - time.monotonic())
@@ -202,8 +203,6 @@ class _Deadline:
 
     def expire(self):
         with self.lock:
-            if self.done:
-                return
             self.expired = True
             for s in self.socks:
                 _hard_close(s)
@@ -225,14 +224,12 @@ class _Watchdog:
             self.cond.notify()
 
     def finished(self, deadline):
-        with self.cond:
-            with deadline.lock:
-                deadline.done = True
+        with self.cond:                        # (under the watchdog's lock: it can't be expiring it meanwhile)
             if deadline in self.pending:
                 self.pending.remove(deadline)
-            self.cond.notify()
 
     def _run(self):
+        idle_since = None
         with self.cond:
             while True:
                 now = time.monotonic()
@@ -240,12 +237,14 @@ class _Watchdog:
                     self.pending.remove(d)
                     d.expire()
                 if self.pending:
+                    idle_since = None
                     self.cond.wait(min(d.end for d in self.pending) - now)
-                else:
-                    self.cond.wait(60)
-                    if not self.pending:         # nothing to watch for a minute: the thread ends
-                        self.thread = None
-                        return
+                    continue
+                idle_since = idle_since or now
+                if now - idle_since >= 60:       # nothing to watch for a minute: the thread ends
+                    self.thread = None
+                    return
+                self.cond.wait(60 - (now - idle_since))
 
 
 _watchdog = _Watchdog()
@@ -286,9 +285,11 @@ class _Connection(http.client.HTTPConnection):
             deadline.add(self.sock)
 
     def request(self, method, url, body=None, headers={}, **kw):
-        super().request(method, url, body, headers, **kw)
         deadline = getattr(_current, 'deadline', None)
-        if deadline is not None and body:
+        if deadline is not None:
+            deadline.uploaded = False          # this request's own
+        super().request(method, url, body, headers, **kw)
+        if deadline is not None and body and any(k.lower() == 'authorization' for k in headers):
             deadline.uploaded = True
 
 
@@ -305,8 +306,8 @@ def within(seconds, fn, *args):
     trickles along (a byte at a time stays under every per-step timeout) is cut off by closing its connections,
     so it can't hold a worker, or the wizard waiting for it, and nothing of it carries on. Raises TookTooLong
     for what the cut-off caused (an answer the TV gave in time, like a 401, is passed on as it is)."""
-    deadline = _Deadline(seconds)
     outer = getattr(_current, 'deadline', None)
+    deadline = _Deadline(min(seconds, outer.left()) if outer is not None else seconds)   # never past the outer
     _current.deadline = deadline
     _watchdog.watch(deadline)
     try:
@@ -314,7 +315,9 @@ def within(seconds, fn, *args):
     except urllib.error.HTTPError:
         raise                                  # the TV's own answer
     except (OSError, http.client.HTTPException) as e:
-        if deadline.expired:
+        # what the cut-off caused: an error once it had closed this call's connections, or a timeout that came
+        # as the time ran out (connecting is limited to the time left, so it times out right at the end)
+        if (deadline.expired and deadline.socks) or time.monotonic() >= deadline.end - 0.25:
             raise TookTooLong('The TV took too long to answer', deadline.uploaded) from e
         raise
     finally:
@@ -369,6 +372,10 @@ class WrongPassword(OSError):
     pass
 
 
+class Unrecognised(OSError):
+    pass
+
+
 class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
     """Digest auth with one try: a refusal of the password is the wrong password (not five more uploads of the
     app). The one exception is a "stale" nonce (the TV wants a fresh one, the password was fine): one retry."""
@@ -379,7 +386,10 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
             if not stale or getattr(req, '_play_stale_retry', False):
                 raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
             req._play_stale_retry = True
-        return super().http_error_401(req, fp, code, msg, headers)
+        try:
+            return super().http_error_401(req, fp, code, msg, headers)
+        except (KeyError, ValueError, IndexError, TypeError) as e:     # a challenge urllib can't parse
+            raise Unrecognised("The TV asked for its password in a way PLAY doesn't recognise") from e
 
 
 def _challenge(value):
@@ -408,7 +418,10 @@ def _authorization(handler, url, timeout):
             return None
     except OSError:                                   # no answer to the GET: let the POST find out
         return None
-    auth = handler.get_authorization(urllib.request.Request(url, method='POST'), chal)   # (errors: install's)
+    try:
+        auth = handler.get_authorization(urllib.request.Request(url, method='POST'), chal)
+    except (KeyError, ValueError, IndexError, TypeError) as e:          # a challenge urllib can't parse
+        raise Unrecognised("The TV asked for its password in a way PLAY doesn't recognise") from e
     return f'Digest {auth}' if auth else None
 
 
@@ -451,8 +464,6 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e
         raise OSError(f'The TV answered {e.code}') from e
-    except (KeyError, ValueError, IndexError, TypeError) as e:   # a password challenge urllib can't parse
-        raise OSError("The TV asked for its password in a way PLAY doesn't recognise") from e
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
     msg = ' '.join(m.strip() for m in msgs if m.strip())
     low = msg.lower()

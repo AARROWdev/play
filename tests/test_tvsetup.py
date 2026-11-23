@@ -1,6 +1,7 @@
 """Set up TVs: the Roku protocol helpers against a fake TV, and the wizard with stand-in TVs. Offscreen, no real
 network beyond localhost, never a real TV."""
 import hashlib
+import socket
 import urllib.error
 import io
 import os
@@ -714,27 +715,6 @@ def test_reopening_during_an_install_searches_and_keeps_the_install(qapp, tmp_pa
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
 
 
-def test_a_check_that_started_before_an_install_doesnt_undo_it(qapp, tmp_path, monkeypatch):
-    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
-                                                                    'app': ('', '')}})
-    d.tv['10.0.0.6']['status'] = tvsetup.INSTALLING
-    d._set('10.0.0.6', {'status': tvsetup.READY, 'info': None, 'app': None, 'msg': ''})     # a late check result
-    assert d.tv['10.0.0.6']['status'] == tvsetup.INSTALLING
-    d._set('10.0.0.6', {'install': True, 'status': tvsetup.DONE, 'msg': 'ok'})              # the install's own
-    assert d.tv['10.0.0.6']['status'] == tvsetup.DONE
-
-
-
-# ------------------------------------------------------------------ 0661768 review
-def test_a_check_that_lands_after_an_install_doesnt_undo_it(qapp, tmp_path, monkeypatch):
-    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
-                                                                    'app': ('', '')}})
-    old = d._next('10.0.0.6')                       # a check starts ...
-    new = d._next('10.0.0.6')                       # ... then an install
-    d._set('10.0.0.6', {'install': True, 'gen': new, 'status': tvsetup.DONE, 'msg': 'ok'})
-    d._set('10.0.0.6', {'gen': old, 'status': tvsetup.READY, 'info': None, 'app': None, 'msg': ''})   # late
-    assert d.tv['10.0.0.6']['status'] == tvsetup.DONE
-
 
 def test_connecting_counts_against_the_time(monkeypatch):
     seen = []
@@ -756,15 +736,6 @@ def test_odd_password_challenges_are_explained(tv, monkeypatch):
             roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
 
 
-def test_a_call_that_finishes_in_time_leaves_nothing_behind():
-    assert roku.within(5, lambda: 'ok') == 'ok'
-    assert roku._watchdog.pending == []
-    d = roku._Deadline(0)
-    d.done = True
-    d.expire()
-    assert not d.expired                            # a finished call is never cut off afterwards
-
-
 def test_a_call_inside_a_call_gives_the_outer_deadline_back():
     def outer():
         before = roku._current.deadline
@@ -781,18 +752,128 @@ def test_the_tvs_own_answer_at_the_limit_isnt_called_too_long():
         roku.within(0.1, refuse)
 
 
-def test_an_install_cut_off_after_the_upload_keeps_the_password(qapp, tmp_path, monkeypatch):
+# ------------------------------------------------------------------ f21695d review
+class SlowAuthInstaller(FakeInstaller):
+    """Answers a password challenge fast, but an upload that carries a password very slowly (as a TV busy
+    installing, or one that has hung)."""
+    preflight_404 = False
+
+    def do_GET(self):
+        if SlowAuthInstaller.preflight_404:
+            self.send_response(404)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        self._challenge()
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        FakeInstaller.uploads += b'ZIP' in body
+        if not self.headers.get('Authorization'):
+            return self._challenge()
+        time.sleep(3)
+
+
+@pytest.fixture
+def slow_tv():
+    FakeInstaller.uploads, FakeInstaller.nonce, SlowAuthInstaller.preflight_404 = 0, 'n0nce', False
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), SlowAuthInstaller)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv.server_address[1]
+    srv.shutdown()
+
+
+def test_no_answer_after_sending_the_app_with_the_password(slow_tv):
+    with pytest.raises(roku.TookTooLong) as e:
+        roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=0.8, port=slow_tv)
+    assert e.value.uploaded
+
+
+def test_an_upload_without_a_password_doesnt_count_as_sent(slow_tv):
+    SlowAuthInstaller.preflight_404 = True          # no challenge up front: the first upload goes without one
+    with pytest.raises(roku.TookTooLong) as e:
+        roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=0.8, port=slow_tv)
+    assert FakeInstaller.uploads == 2               # the bare one, then the one with the password ...
+    assert e.value.uploaded                         # ... which is the one that counts
+
+
+def test_no_answer_after_the_app_went_is_unsure_and_keeps_no_password(qapp, tmp_path, monkeypatch):
     class Late(FakeNet):
         def install(self, ip, pw, data):
             raise roku.TookTooLong('The TV took too long to answer', uploaded=True)
     monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
     lib = library.Library(str(tmp_path))
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.9': 'enc:old'})        # the same TV, another address
     net = Late({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}})
     d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
     wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
-    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('maybe', True))
     select(d, '10.0.0.6')
     d.install_current()
-    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
-    assert 'may already be on the TV' in d.detail.text()
-    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.UNSURE)
+    assert "didn't say how it went" in d.detail.text() and d.go.text() == 'Install again'
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.9': 'enc:old'}   # nothing stored, nothing pruned
+
+
+def test_a_slow_check_that_lands_after_an_install_is_ignored(qapp, tmp_path, monkeypatch):
+    gate, slow = threading.Event(), {'on': False}
+
+    class SlowCheck(FakeNet):
+        def info(self, ip):
+            if slow['on']:
+                gate.wait(5)
+                return dict(super().info(ip), dev_mode=True)
+            return super().info(ip)
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    net = SlowCheck({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'pw'}})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    slow['on'] = True
+    d._check('10.0.0.6')                            # a check starts, and hangs ...
+    d.tv['10.0.0.6']['status'] = tvsetup.READY
+    monkeypatch.setattr(tvsetup, 'confirm', lambda *a: True)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.6')
+    d.install_current()                             # ... an install starts and finishes ...
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
+    gate.set()                                      # ... then the old check answers
+    time.sleep(0.3)
+    QApplication.processEvents()
+    assert d.tv['10.0.0.6']['status'] == tvsetup.DONE
+
+
+def test_a_call_that_finishes_in_time_leaves_nothing_behind():
+    assert roku.within(5, lambda: 'ok') == 'ok'
+    assert roku._watchdog.pending == []
+
+
+def test_the_watchdog_stays_up_after_a_cut_off():
+    with pytest.raises(roku.TookTooLong):
+        roku.within(0.1, lambda: (time.sleep(0.3), (_ for _ in ()).throw(socket.timeout('timed out'))))
+    time.sleep(0.2)
+    assert roku._watchdog.thread is not None and roku._watchdog.thread.is_alive()
+
+
+def test_a_connect_that_times_out_at_the_end_is_too_long(monkeypatch):
+    def connect(self):
+        time.sleep(self.timeout)
+        raise socket.timeout('timed out')
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', connect)
+    with pytest.raises(roku.TookTooLong):
+        roku.within(0.3, lambda: roku._Connection('127.0.0.1', 9, timeout=120).connect())
+
+
+def test_a_call_inside_a_call_is_capped_by_the_outer_one():
+    seen = []
+
+    def outer():
+        roku.within(60, lambda: seen.append(roku._current.deadline.left()))
+    roku.within(1, outer)
+    assert seen[0] <= 1
+
+
+def test_plays_own_mistakes_arent_called_an_odd_challenge(tv, monkeypatch):
+    monkeypatch.setattr(roku, '_multipart', lambda *a: (_ for _ in ()).throw(TypeError('a bug in PLAY')))
+    with pytest.raises(TypeError):
+        roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
