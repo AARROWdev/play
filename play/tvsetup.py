@@ -365,9 +365,9 @@ class TvSetupDialog(QDialog):
             # the app was sent, with the password, but no answer came: it may or may not be on the TV. Nothing
             # says the password worked, so it isn't kept.
             st['status'], st['msg'] = (UNSURE if e.uploaded else FAILED), str(e)
-        except roku.WrongPassword:
+        except roku.WrongPassword as e:
             st['status'], st['wrong'] = FAILED, True
-            st['msg'] = 'The TV didn\'t accept that password.'
+            st['msg'] = str(e) or 'The TV didn\'t accept that password.'
         except Exception as e:
             st['status'], st['msg'] = FAILED, str(e) or type(e).__name__
         self.bus.state.emit(ip, st)

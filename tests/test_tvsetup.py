@@ -192,7 +192,7 @@ class FakeNet:
 
     def install(self, ip, pw, data):
         if pw != self.tvs[ip].get('password', 'pw'):
-            raise roku.WrongPassword('no')
+            raise roku.WrongPassword('The TV did not accept that developer password')
         self.installs.append((ip, pw))
         self.tvs[ip]['app'] = ('PLAY', roku.app_version())
         return 'Install Success.'
@@ -1144,8 +1144,8 @@ def test_no_new_connection_after_the_time_is_up(monkeypatch):
     real = roku._Connection.connect
 
     def connect(self):
-        connects.append(time.monotonic())
-        return real(self)
+        real(self)
+        connects.append(time.monotonic())          # (connections actually made)
     monkeypatch.setattr(roku._Connection, 'connect', connect)
 
     real_answer = roku._OnceDigest.get_authorization
@@ -1171,10 +1171,59 @@ def test_a_refusal_leaves_nothing_open(tv):
     FakeInstaller.refuse_bare = True
     with pytest.raises(roku.WrongPassword) as e:
         roku.install('127.0.0.1', 'nope', b'ZIP', port=tv)
-    cause = e.value.__cause__
-    assert cause.fp is None or cause.fp.closed
+    assert e.value.__cause__.fp.closed
 
 
-def test_a_password_with_accents_is_a_wrong_password():
-    with pytest.raises(roku.WrongPassword):
+def test_a_password_with_accents_is_a_wrong_password(monkeypatch):
+    monkeypatch.setattr(roku._Connection, 'connect', lambda self: (_ for _ in ()).throw(AssertionError('connected')))
+    with pytest.raises(roku.WrongPassword, match='plain letters'):
         roku.install('127.0.0.1', 'sécret', b'ZIP', port=9)
+
+
+
+# ------------------------------------------------------------------ 1956e62 review
+def test_a_stale_answer_then_the_cut_off_isnt_unsure(tv, monkeypatch):
+    FakeInstaller.stale_once = True
+    real_answer = roku._OnceDigest.get_authorization
+    calls = []
+
+    def slow_second(self, req, chal):               # the stale 401 is in, then time runs out before the retry
+        calls.append(1)
+        if len(calls) == 2:
+            time.sleep(0.8)
+        return real_answer(self, req, chal)
+    monkeypatch.setattr(roku._OnceDigest, 'get_authorization', slow_second)
+    with pytest.raises(roku.TookTooLong) as e:
+        roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=0.5, port=tv)
+    assert not e.value.uploaded                     # the TV refused that upload (stale): nothing to be unsure of
+
+
+def test_no_connection_once_the_time_is_up_even_if_the_watchdog_is_late(monkeypatch):
+    monkeypatch.setattr(roku._watchdog, 'watch', lambda d: None)            # it never gets to it
+    made = []
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: made.append(1))
+
+    def late_connect():
+        time.sleep(0.3)
+        roku._Connection('127.0.0.1', 9, timeout=5).connect()
+    with pytest.raises(roku.TookTooLong):
+        roku.within(0.1, late_connect)
+    assert made == []
+
+
+def test_the_wizard_shows_why_a_password_was_refused(qapp, tmp_path, monkeypatch):
+    class Plain(FakeNet):
+        def install(self, ip, pw, data):
+            raise roku.WrongPassword('A Roku developer password uses only plain letters, digits and symbols')
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Plain({'10.0.0.6': {
+        'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    answers = iter([('sécret', True), ('', False)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert 'plain letters' in d.detail.text()

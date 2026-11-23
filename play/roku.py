@@ -291,6 +291,9 @@ _current = threading.local()            # the deadline of the call running in th
 class _Connection(http.client.HTTPConnection):
     def connect(self):
         deadline = getattr(_current, 'deadline', None)
+        if deadline is not None and (deadline.expired or time.monotonic() >= deadline.end):
+            deadline.cut = True                # time is up: no new connection to the TV (on any path)
+            raise socket.timeout('The time ran out before connecting')
         if deadline is not None:               # connecting counts too: a little past the time left, so the
             limit = deadline.left() + 0.1      # watchdog has always called time first
             self.timeout = min(self.timeout, limit) if self.timeout else limit
@@ -349,6 +352,7 @@ def _get(url, timeout=4):
     try:
         return within(DEADLINE, fetch)
     except urllib.error.HTTPError as e:
+        e.close()                              # (a Limited TV refuses every poll: don't keep each answer open)
         if e.code in (401, 403):
             raise Blocked(f'{e.code}') from e
         raise
@@ -407,9 +411,6 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
         value = self.get_authorization(req, chal)
         if not value:                                           # a challenge it can't answer (NTLM, Basic, blank,
             raise Unrecognised(UNRECOGNISED)                    # no realm): not how a Roku asks, nor a refusal
-        deadline = getattr(_current, 'deadline', None)
-        if deadline is not None and deadline.expired:           # time is up: no new connection to the TV
-            raise ConnectionAbortedError('The time ran out before the password could go')
         req.add_unredirected_header(self.auth_header, f'Digest {value}')
         return self.parent.open(req, timeout=req.timeout)       # (its own errors are its own)
 
