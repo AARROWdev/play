@@ -840,3 +840,24 @@ def test_missing_folders_are_named_in_the_status(win):
     win.lib.missing = [r'D:\Media\Kids', r'D:\Media\Films']
     win._status()
     assert 'Update them in Settings' in win.status.toolTip()
+
+
+
+def test_set_up_tvs_is_one_dialog_and_opens_again(win, monkeypatch):
+    from play import tvsetup
+    monkeypatch.setattr(tvsetup.TvSetupDialog, 'search', lambda self: None)
+    shown = []
+
+    def exec_(self):
+        shown.append(self)
+        self.setVisible(True)
+        if len(shown) == 1:
+            win.open_tv_setup()                     # the tray's Set up TVs while it's open: just brought up
+            assert len(shown) == 1 and not self.closing
+        self.setVisible(False)
+        return 0
+    monkeypatch.setattr(tvsetup.TvSetupDialog, 'exec', exec_)
+    win.open_tv_setup()
+    assert shown[0].closing
+    win.open_tv_setup()                             # opened again: the same dialog
+    assert len(shown) == 2 and shown[1] is shown[0] and shown[0].closing

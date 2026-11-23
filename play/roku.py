@@ -32,7 +32,7 @@ DEV_USER = 'rokudev'
 APP_TITLE = 'PLAY'
 MAX_REPLY = 1 << 20          # a TV's answers are a few KB: anything bigger isn't one
 
-DEADLINE = 30               # seconds for a whole answer, however slowly it trickles in
+DEADLINE = 30               # seconds for a whole question and its answer, however slowly they go
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -45,7 +45,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 # TVs are reached directly, never through a proxy (on Windows an IP address on the home network isn't covered by
 # the proxy bypass list, so a system, VPN or office proxy would get the questions and the password exchange), and
 # never by a redirect
-_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+def opener(*handlers):
+    """An opener that goes straight to the TV: no proxy (whatever the system or environment says) and no
+    redirects."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), *handlers)
+
+
+_DIRECT = opener()
 
 
 def app_dir():
@@ -154,13 +160,10 @@ class Blocked(OSError):
     """The TV answered but refused: its "Control by mobile apps" setting is off (or Limited)."""
 
 
-def _read(r, deadline=DEADLINE):
-    """The whole answer, at most MAX_REPLY bytes and within `deadline` seconds (a reply that trickles in a byte at
-    a time would otherwise hold a worker, and the closed wizard, for good)."""
-    end, chunks, n = time.monotonic() + deadline, [], 0
+def _read(r):
+    """The whole answer, at most MAX_REPLY bytes."""
+    chunks, n = [], 0
     while True:
-        if time.monotonic() > end:
-            raise OSError('The TV took too long to answer')
         chunk = r.read1(65536) if hasattr(r, 'read1') else r.read(65536)
         if not chunk:
             return b''.join(chunks)
@@ -170,10 +173,33 @@ def _read(r, deadline=DEADLINE):
         chunks.append(chunk)
 
 
+def within(deadline, fn, *args):
+    """fn(*args), given `deadline` seconds in all: connecting, sending, the answer's headers and body. A request
+    that trickles along (a byte at a time stays under every per-step timeout) is given up on, so it can't hold a
+    worker, or the wizard waiting for it, for good; the abandoned call ends on its own socket timeouts."""
+    box = {}
+
+    def run():
+        try:
+            box['value'] = fn(*args)
+        except BaseException as e:            # handed back to the caller below
+            box['error'] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(deadline)
+    if t.is_alive():
+        raise OSError('The TV took too long to answer')
+    if 'error' in box:
+        raise box['error']
+    return box['value']
+
+
 def _get(url, timeout=4):
-    try:
+    def fetch():
         with _DIRECT.open(url, timeout=timeout) as r:
             return _read(r)
+    try:
+        return within(DEADLINE, fetch)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise Blocked(f'{e.code}') from e
@@ -221,28 +247,43 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
 
     def http_error_401(self, req, fp, code, msg, headers):
         if req.unredirected_hdrs.get('Authorization'):
-            stale = 'stale=true' in (headers.get('WWW-Authenticate') or '').replace(' ', '').lower()
+            stale = _challenge(headers.get('WWW-Authenticate')).get('stale', '').lower() == 'true'
             if not stale or getattr(req, '_play_stale_retry', False):
                 raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
             req._play_stale_retry = True
         return super().http_error_401(req, fp, code, msg, headers)
 
 
+def _challenge(value):
+    """A Digest challenge's fields ({'realm': ..., 'nonce': ..., 'stale': ...}), {} when it isn't one."""
+    value = value or ''
+    if not value.lower().startswith('digest '):
+        return {}
+    try:
+        return urllib.request.parse_keqv_list(filter(None, urllib.request.parse_http_list(value[7:])))
+    except ValueError:
+        return {}
+
+
 def _authorization(handler, url, timeout):
     """The Authorization header for a POST to url, from a challenge fetched with a small GET first (so the app
-    itself is uploaded once). None when the TV didn't challenge (or answered something else)."""
+    itself is uploaded once). None when that didn't work out (no challenge, an odd one, or no answer): then the
+    POST gets its challenge the usual way."""
     try:
         with _DIRECT.open(urllib.request.Request(url, method='GET'), timeout=timeout) as r:
             _read(r)
         return None                                  # no password asked: nothing to add
     except urllib.error.HTTPError as e:
-        chal = e.headers.get('WWW-Authenticate') or ''
+        chal = _challenge(e.headers.get('WWW-Authenticate'))
         e.close()
-        if e.code != 401 or not chal.lower().startswith('digest '):
+        if e.code != 401 or not chal:
             return None
-    req = urllib.request.Request(url, method='POST')
-    keqv = urllib.request.parse_keqv_list(urllib.request.parse_http_list(chal[7:]))
-    auth = handler.get_authorization(req, keqv)
+    except OSError:                                   # no answer to the GET: let the POST find out
+        return None
+    try:
+        auth = handler.get_authorization(urllib.request.Request(url, method='POST'), chal)
+    except (ValueError, KeyError, TypeError):
+        return None
     return f'Digest {auth}' if auth else None
 
 
@@ -267,15 +308,18 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, url, DEV_USER, password)
     handler = _OnceDigest(pm)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), handler)
+    upload = opener(handler)
     body, ctype = _multipart({'mysubmit': 'Install'}, {'archive': ('PLAY-roku.zip', zip_bytes, 'application/zip')})
     req = urllib.request.Request(url, data=body, headers={'Content-Type': ctype}, method='POST')
-    auth = _authorization(handler, url, min(timeout, 15))
-    if auth:
-        req.add_unredirected_header('Authorization', auth)
+
+    def send():
+        auth = _authorization(handler, url, min(timeout, 15))
+        if auth:
+            req.add_unredirected_header('Authorization', auth)
+        with upload.open(req, timeout=timeout) as r:
+            return _read(r).decode('utf-8', 'replace')
     try:
-        with opener.open(req, timeout=timeout) as r:
-            text = _read(r, timeout).decode('utf-8', 'replace')
+        text = within(timeout, send)
     except urllib.error.HTTPError as e:
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e

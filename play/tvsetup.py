@@ -145,13 +145,13 @@ class TvSetupDialog(QDialog):
 
     def reopen(self):
         self.closing = False
+        for ip, t in self.tv.items():                  # a wrong password that came in while it was closed
+            if t.pop('ask_again', False):
+                QTimer.singleShot(0, lambda ip=ip: self._retry(ip))
         self.search()
 
-    def installing(self):
-        return any(t['status'] == INSTALLING for t in self.tv.values())
-
     def search(self):
-        if self.searching or self.installing():
+        if self.searching:
             return
         self.searching = True
         self.again.setEnabled(False)
@@ -172,7 +172,8 @@ class TvSetupDialog(QDialog):
         if self.closing:
             return
         for ip in ips:
-            if self.tv.get(ip, {}).get('status') != INSTALLING:
+            t = self.tv.get(ip, {})
+            if t.get('status') != INSTALLING and not t.get('ask_again'):
                 self._check(ip)
         self._details()
 
@@ -213,7 +214,9 @@ class TvSetupDialog(QDialog):
         cur.update(st)
         self._row(ip)
         self._details()
-        if wrong and not self.closing:                  # ask again, once
+        if wrong and self.closing:                      # ask again, once: when it's opened again
+            cur['ask_again'] = True
+        elif wrong:
             QTimer.singleShot(0, lambda: self._retry(ip))
 
     def _retry(self, ip):
@@ -279,7 +282,7 @@ class TvSetupDialog(QDialog):
         labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall'}
         self.go.setText(labels.get(s, 'Install on this TV'))
         self.go.setEnabled(s in (READY, OTHER, INSTALLED, OLDER, BLOCKED, DONE, FAILED))
-        self.again.setEnabled(not self.searching and not self.installing())
+        self.again.setEnabled(not self.searching)
 
     # ------------------------------------------------------------------ adding and installing
     def add_by_address(self):
@@ -364,10 +367,10 @@ def _after_install(dlg, ip, st):
     if not key:
         return
     pws = dict(dlg.lib.data['tv_passwords'])
-    serial = key.rsplit('@', 1)[0]
-    for k in [k for k in pws if k != key and k.rsplit('@', 1)[0] == serial]:
-        del pws[k]                                  # the same TV at an address it had before
-    if st.get('pw'):
+    if st.get('pw'):                                # it worked: the same TV's old addresses are forgotten
+        serial = key.rsplit('@', 1)[0]
+        for k in [k for k in pws if k != key and k.rsplit('@', 1)[0] == serial]:
+            del pws[k]
         if not pws.get(key) or dlg.net.unprotect(pws[key]) != st['pw']:
             try:
                 pws[key] = dlg.net.protect(st['pw'])

@@ -1,6 +1,7 @@
 """Set up TVs: the Roku protocol helpers against a fake TV, and the wizard with stand-in TVs. Offscreen, no real
 network beyond localhost, never a real TV."""
 import hashlib
+import urllib.error
 import io
 import os
 import re
@@ -160,7 +161,7 @@ class FakeNet:
             raise OSError('no route')
         if t.get('blocked'):
             raise roku.Blocked('403')
-        return dict(ip=ip, serial='SER-' + ip, model='TCL', is_tv=True, **t['info'])
+        return {'ip': ip, 'serial': 'SER-' + ip, 'model': 'TCL', 'is_tv': True, **t['info']}
 
     def dev_app(self, ip):
         return self.tvs[ip].get('app')
@@ -330,6 +331,7 @@ def test_ssdp_answers_are_only_trusted_from_where_they_came():
 def test_install_never_goes_through_a_proxy(tv, monkeypatch):
     monkeypatch.setenv('HTTP_PROXY', 'http://127.0.0.1:9')                     # a proxy that isn't there
     monkeypatch.setenv('NO_PROXY', '')
+    monkeypatch.setattr(roku, '_DIRECT', roku.opener())                        # (install makes its own: also now)
     assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
 
 
@@ -393,7 +395,9 @@ def test_closing_mid_install_still_keeps_the_password(qapp, tmp_path, monkeypatc
     monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
     select(d, '10.0.0.6')
     d.install_current()
-    assert not d.again.isEnabled()                                          # no search while installing
+    d.search()                                                              # a search meanwhile leaves it be
+    wait_for(lambda: not d.searching)
+    assert d.tv['10.0.0.6']['status'] == tvsetup.INSTALLING
     d.release()                                                             # closed mid-install
     QApplication.processEvents()
     assert shiboken6.isValid(d)                                             # kept until the install is done
@@ -410,9 +414,9 @@ class FakeEcp(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if FakeEcp.redirect:
+        if FakeEcp.redirect and self.path != '/elsewhere':
             self.send_response(302)
-            self.send_header('Location', 'http://127.0.0.1:9/elsewhere')
+            self.send_header('Location', FakeEcp.redirect)
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
@@ -450,23 +454,28 @@ def test_a_failure_message_is_a_failure(tv):
 
 
 def test_questions_go_direct_and_dont_follow_redirects(ecp, monkeypatch):
+    # a proxy set now, that isn't there: an opener made now (as both of roku's are made) must not use it
     monkeypatch.setenv('HTTP_PROXY', 'http://127.0.0.1:9')
     monkeypatch.setenv('NO_PROXY', '')
-    assert b'X1' in roku._get(ecp)                                            # no proxy
-    FakeEcp.redirect = True
-    with pytest.raises(OSError):
-        roku._get(ecp)                                                        # a redirect isn't followed
+    monkeypatch.setattr(roku, '_DIRECT', roku.opener())
+    assert b'X1' in roku._get(ecp)
+    # a 302 to a page that answers is refused, its answer never read
+    target = ThreadingHTTPServer(('127.0.0.1', 0), FakeEcp)
+    threading.Thread(target=target.serve_forever, daemon=True).start()
+    try:
+        FakeEcp.redirect = f'http://127.0.0.1:{target.server_address[1]}/elsewhere'
+        with pytest.raises(urllib.error.HTTPError):
+            roku._get(ecp)
+    finally:
+        target.shutdown()
 
 
-def test_an_answer_that_trickles_in_is_cut_off(monkeypatch):
-    clock = iter(range(0, 1000, 5))
-    monkeypatch.setattr(roku.time, 'monotonic', lambda: next(clock))
-
-    class Drip:
-        def read1(self, n):
-            return b'x'
-    with pytest.raises(OSError):
-        roku._read(Drip(), deadline=30)
+def test_a_request_that_trickles_along_is_given_up_on():
+    with pytest.raises(OSError, match='too long to answer'):
+        roku.within(0.2, time.sleep, 3)
+    assert roku.within(1, lambda: 'ok') == 'ok'
+    with pytest.raises(KeyError):
+        roku.within(1, {}.__getitem__, 'x')                                   # its own errors come through
 
 
 def test_the_replace_question_is_plain_text(qapp, monkeypatch):
@@ -527,3 +536,80 @@ def test_old_password_keys_are_dropped(qapp, tmp_path, monkeypatch):
     d.install_current()
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
     assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}    # the TV's old address is gone
+
+
+
+# ------------------------------------------------------------------ 9191676 review
+def test_a_quoted_stale_nonce_is_retried(tv, monkeypatch):
+    real = FakeInstaller._challenge
+
+    def quoted(self, stale=False):
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', f'Digest realm="rokudev", nonce="{FakeInstaller.nonce}", qop="auth"'
+                         + (', stale="true"' if stale else ''))
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+    monkeypatch.setattr(FakeInstaller, '_challenge', quoted)
+    FakeInstaller.stale_once = True
+    assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIPDATA', port=tv)
+    assert real
+
+
+def test_an_odd_challenge_falls_back_to_the_upload_itself():
+    assert roku._challenge('Digest realm="rokudev",, nonce="n"') == {'realm': 'rokudev', 'nonce': 'n'}
+    assert roku._challenge('Basic realm="x"') == {}
+    assert roku._challenge('Digest ,,,') == {}
+
+
+def test_no_answer_to_the_first_question_still_installs(tv, monkeypatch):
+    real_open = roku._DIRECT.open
+
+    def flaky(req, *a, **k):
+        if getattr(req, 'method', None) == 'GET':
+            raise urllib.error.URLError('timed out')
+        return real_open(req, *a, **k)
+    monkeypatch.setattr(roku._DIRECT, 'open', flaky)
+    assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIPDATA', port=tv)
+
+
+def test_a_refused_password_elsewhere_keeps_the_tvs_password(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch,
+                         {'10.0.0.7': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'x'}})
+    net.tvs['10.0.0.7']['info']['serial'] = 'SER-10.0.0.6'                   # the same serial, another address
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:pw'})
+    d._check('10.0.0.7')
+    wait_for(lambda: d.tv['10.0.0.7']['status'] == tvsetup.READY)
+    answers = iter([('wrong', True), ('', False)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    select(d, '10.0.0.7')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.7']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}
+
+
+def test_a_wrong_password_while_closed_is_asked_when_reopened(qapp, tmp_path, monkeypatch):
+    gate = threading.Event()
+
+    class Slow(FakeNet):
+        def install(self, ip, pw, data):
+            gate.wait(5)
+            return super().install(ip, pw, data)
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    net = Slow({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'right'}})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    asked = []
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: asked.append(a[2]) or ('wrong', True))
+    select(d, '10.0.0.6')
+    d.install_current()
+    d.release()
+    gate.set()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert len(asked) == 1                                                  # not asked while closed
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: asked.append(a[2]) or ('right', True))
+    d.reopen()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
+    assert "didn't work" in asked[1]

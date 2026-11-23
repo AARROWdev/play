@@ -883,6 +883,10 @@ class Window(QMainWindow):
         from .tvsetup import TvSetupDialog
         self.bring_up()
         d = getattr(self, '_tv_setup', None)
+        if d is not None and d.isVisible():            # already open (the tray, while it's showing): bring it up
+            d.raise_()
+            d.activateWindow()
+            return
         if d is None:                                  # one per window: reopening shows an install still running
             d = self._tv_setup = TvSetupDialog(self, self.lib, self.srv)
         else:
