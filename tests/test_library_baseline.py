@@ -1,6 +1,7 @@
 """Library and names fixes from the baseline review (B2, B4, B8, B10-B14, B19, B23-B25, B31-B38, B43, B50, B56)."""
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -929,3 +930,41 @@ def test_case_e_a_title_stays_with_the_deepest_folder(tmp_path):
     films = os.path.normcase(str(root / 'Films'))
     assert [os.path.basename(e[1]) for e in lb._raw[sub]] == ['Brazil 1985.mkv']
     assert [os.path.basename(e[1]) for e in lb._raw[films]] == ['Alien 1979.mkv']
+
+
+
+# ------------------------------------------------------------------ 8dd6488 review
+def test_removing_a_folder_a_link_leads_to_while_it_is_offline(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', other)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(other)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(other), str(tmp_path / 'gone'))
+    lb.scan()
+    lb.set_folders([{'path': str(media)}])                 # the Other folder was redundant: removed
+    lb.scan()
+    assert titles_now(lb) == ['Alien', 'Heat']
+    alien = next(i for i in lb.current() if i['title'] == 'Alien')
+    assert os.path.normcase(str(media / 'Films')) in os.path.normcase(alien['path'])
+
+
+def test_a_deleted_media_folder_leaves_no_ghosts(tmp_path):
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    make(str(media / 'Films'), 'Alien 1979.mkv')
+    make(str(tmp_path), 'single.mkv', b'single' * 50)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Films')}, {'path': str(tmp_path / 'single.mkv')}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    shutil.rmtree(str(media / 'Films'))
+    lb.scan()
+    assert titles_now(lb) == ['Heat']
+
+
+def titles_now(lb):
+    lb.scan()
+    return sorted(i['title'] for i in lb.current())
