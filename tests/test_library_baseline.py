@@ -831,19 +831,20 @@ def test_a_clock_under_a_link_that_goes_offline_is_kept(tmp_path, monkeypatch):
 
 
 def test_a_clock_in_a_nested_media_folder_that_is_away_is_kept(tmp_path, monkeypatch):
-    movies = tmp_path / 'Movies'
+    movies, nas = tmp_path / 'Movies', tmp_path / 'NAS4K'
     make(str(movies), 'Heat 1995.mkv')
-    make(str(movies / '4K' / 'Locked'), 'x.mkv')
-    make(str(movies / '4K'), 'Alien 1979.mkv')
+    make(str(nas / 'Locked'), 'x.mkv')
+    make(str(nas), 'Alien 1979.mkv', b'alien' * 50)
+    _junction(movies / '4K', nas)
     _locked_scandir(monkeypatch)
     lb = library.Library(str(tmp_path / 'store'))
     lb.set_folders([{'path': str(movies)}, {'path': str(movies / '4K')}])
     lb.items(0)
     locked = dict(lb.data['unreadable_since'])
     assert locked
-    os.rename(str(movies / '4K'), str(tmp_path / 'away'))
+    os.rename(str(nas), str(tmp_path / 'asleep'))  # the NAS sleeps: 4K is there, but leads nowhere
     lb.scan()
-    assert lb.data['unreadable_since'] == locked
+    assert lb.data['unreadable_since'] == locked and lb.missing == []
 
 
 def test_a_media_folder_with_a_trailing_slash_in_the_settings(tmp_path):
@@ -1008,8 +1009,7 @@ def test_case_g_a_link_into_a_link_keeps_a_clean_path(tmp_path):
     lb.set_folders([{'path': str(media)}])
     assert titles_now(lb) == ['Alien', 'Heat']
     alien = next(i for i in lb.current() if i['title'] == 'Alien')
-    assert os.path.normcase(alien['path']) == os.path.normcase(str(media / 'All' / 'Movies' / 'Films' / 'Alien 1979.mkv'))
-    assert alien['path'].endswith('Alien 1979.mkv')
+    assert alien['path'] == str(media / 'All' / 'Movies' / 'Films' / 'Alien 1979.mkv')   # names as written
 
 
 def test_case_h_a_deleted_parent_leaves_no_ghosts(tmp_path):
@@ -1022,6 +1022,7 @@ def test_case_h_a_deleted_parent_leaves_no_ghosts(tmp_path):
     shutil.rmtree(str(media / 'Kids'))
     assert titles_now(lb) == ['Heat']
     assert lb.unreachable == [] and not lb._incomplete
+    assert lb.missing == [str(media / 'Kids' / 'Cartoons')]
 
 
 def test_a_file_where_a_media_folder_was(tmp_path):
@@ -1045,3 +1046,80 @@ def test_a_folder_behind_an_offline_link_is_not_deleted(tmp_path):
     _junction(media / 'Films', other)
     os.rename(str(other), str(tmp_path / 'gone'))
     assert not library._gone(str(media / 'Films' / 'Sub'), {os.path.normcase(str(media))})
+
+
+
+# ------------------------------------------------------------------ c4b35e1 review
+def test_a_deleted_kids_folder_stops_making_films_kids(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other), 'Up 2009.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    (media / 'Kids' / 'Cartoons').mkdir(parents=True)
+    _junction(media / 'Kids' / 'Cartoons' / 'Link', other)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids' / 'Cartoons'), 'kids': True},
+                    {'path': str(other)}])
+    lb.items(0)
+    os.rmdir(str(media / 'Kids' / 'Cartoons' / 'Link'))
+    shutil.rmtree(str(media / 'Kids'))
+    lb.scan()
+    make(str(other), 'Brazil 1985.mkv', b'brazil' * 50)
+    library.SETTLE = 0
+    lb.scan()
+    brazil = next(i for i in lb.current() if i['title'] == 'Brazil')
+    assert not brazil['kids']
+
+
+def test_a_renamed_media_folder_is_reported(tmp_path, qapp_free=None):
+    media = tmp_path / 'Media'
+    make(str(media / 'Kids'), 'Up 2009.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids')}])
+    lb.items(0)
+    os.rename(str(media / 'Kids'), str(media / 'Children'))
+    lb.scan()
+    assert lb.missing == [str(media / 'Kids')] and lb.unreachable == []
+
+
+def test_a_clock_under_a_deleted_folder_is_dropped(tmp_path, monkeypatch):
+    media = tmp_path / 'Media'
+    make(str(media / 'Sub' / 'Locked'), 'x.mkv')
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _locked_scandir(monkeypatch)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Sub')}])
+    lb.items(0)
+    assert lb.data['unreadable_since']
+    monkeypatch.undo()                             # (rmtree lists folders too)
+    shutil.rmtree(str(media / 'Sub'))
+    lb.scan()
+    assert lb.data['unreadable_since'] == {}
+
+
+def test_a_deleted_link_is_forgotten(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', other)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}])
+    lb.items(0)
+    assert lb._links
+    os.rmdir(str(media / 'Films'))
+    lb.scan()
+    assert lb._links == {}
+
+
+def test_the_kept_titles_pool_is_reused_until_something_changes(tmp_path):
+    lb, root = _offline_link_setup(tmp_path)
+    first = lb._pool_cache[1]
+    assert first is not None
+    lb.scan()
+    assert lb._pool_cache[1] is first                      # nothing changed: the same pool
+    make(str(root), 'Up 2009.mkv', b'up' * 50)
+    library.SETTLE = 0
+    lb.scan()
+    lb.scan()
+    assert lb._pool_cache[1] is not first                  # a new title: built again
