@@ -968,3 +968,80 @@ def test_a_deleted_media_folder_leaves_no_ghosts(tmp_path):
 def titles_now(lb):
     lb.scan()
     return sorted(i['title'] for i in lb.current())
+
+
+
+# ------------------------------------------------------------------ 2216030 review
+def test_case_f_two_links_to_one_place_one_removed(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other), 'Alien 1979.mkv')
+    a, media = tmp_path / 'A', tmp_path / 'Media'
+    a.mkdir()
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(a / 'F', other)
+    _junction(media / 'Films', other)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(a)}, {'path': str(media)}, {'path': str(other)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    lb.set_folders([{'path': str(media)}, {'path': str(other)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(other), str(tmp_path / 'gone'))
+    lb.scan()
+    lb.set_folders([{'path': str(media)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    assert all(os.path.normcase(str(a)) not in k for k in lb._links)
+
+
+def test_case_g_a_link_into_a_link_keeps_a_clean_path(tmp_path):
+    store = tmp_path / 'Store'
+    make(str(store / 'Movies' / 'Films'), 'Alien 1979.mkv')
+    j = tmp_path / 'J'
+    _junction(j, store / 'Movies' / 'Films')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'All', store)
+    lb = library.Library(str(tmp_path / 'store-settings'))
+    lb.set_folders([{'path': str(media)}, {'path': str(j)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(store), str(tmp_path / 'gone'))
+    lb.scan()
+    lb.set_folders([{'path': str(media)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    alien = next(i for i in lb.current() if i['title'] == 'Alien')
+    assert os.path.normcase(alien['path']) == os.path.normcase(str(media / 'All' / 'Movies' / 'Films' / 'Alien 1979.mkv'))
+    assert alien['path'].endswith('Alien 1979.mkv')
+
+
+def test_case_h_a_deleted_parent_leaves_no_ghosts(tmp_path):
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    make(str(media / 'Kids' / 'Cartoons'), 'Up 2009.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids' / 'Cartoons')}])
+    assert titles_now(lb) == ['Heat', 'Up']
+    shutil.rmtree(str(media / 'Kids'))
+    assert titles_now(lb) == ['Heat']
+    assert lb.unreachable == [] and not lb._incomplete
+
+
+def test_a_file_where_a_media_folder_was(tmp_path):
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    make(str(media / 'Films'), 'Alien 1979.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Films')}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    shutil.rmtree(str(media / 'Films'))
+    (media / 'Films').write_bytes(b'not a folder')
+    assert titles_now(lb) == ['Heat']
+    assert library._gone(str(media / 'Films'), {os.path.normcase(str(media))})
+
+
+def test_a_folder_behind_an_offline_link_is_not_deleted(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other / 'Sub'), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    media.mkdir()
+    _junction(media / 'Films', other)
+    os.rename(str(other), str(tmp_path / 'gone'))
+    assert not library._gone(str(media / 'Films' / 'Sub'), {os.path.normcase(str(media))})

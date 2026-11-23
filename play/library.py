@@ -228,6 +228,7 @@ class Library:
                                    # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
         self._links = {}           # link (normcased) -> (its path, real target), as last seen online
+        self._pool_cache = (None, None)   # (what it was built from, the kept-titles pool)
         self._live_roots = set()   # roots the last walk reached (their files win over kept ones)
         self._raw_sig = None
         self._pending = {}         # normcased path -> [size, mtime_ns, first seen (monotonic)] of an unsettled file
@@ -351,27 +352,42 @@ class Library:
             pool = None
 
             def get_pool():
-                """Built only when something couldn't be read. A path no media folder holds any more (its folder
-                was removed) is found again through a link that leads to where the file really is."""
+                """The kept titles, by the media folder that owns each now. Built only when something couldn't be
+                read, and reused while nothing it depends on changed. An entry is owned by where the file really is
+                (e[4]): the deepest of every media folder's real location and every link's target (seen online now
+                or before) under a media folder, and named by that folder's or link's path plus the rest of e[4]. So a
+                file is found again through any link to it when the folder it was listed under is removed."""
                 nonlocal pool
-                if pool is None:
-                    pool = {}
-                    targets = sorted(((lk, lp, t.rstrip(os.sep) + os.sep) for lk, (lp, t) in links.items()),
-                                     key=lambda x: -len(x[2]))
-                    for files in prev_raw.values():
-                        for e in files:
-                            k = os.path.normcase(e[1])
-                            o = owner(k)
-                            if o is None:
-                                for lk, lp, tpre in targets:
-                                    if e[4].startswith(tpre):
-                                        tail = e[1][len(e[1]) - (len(e[4]) - len(tpre)):]
-                                        e = (e[0], os.path.join(lp, tail), e[2], e[3], e[4])
-                                        k, o = os.path.normcase(e[1]), owner(os.path.normcase(e[1]))
-                                        break
-                            if o is not None:
-                                pool.setdefault(o, {}).setdefault(k, e)
+                if pool is not None:
+                    return pool
+                key = (tuple(sorted(raw_prev_sig)), tuple(sorted(real_of.items())),
+                       tuple(sorted(links.items())), tuple(roots))
+                if self._pool_cache[0] == key:
+                    pool = self._pool_cache[1]
+                    return pool
+                anchors = [(real_of[r], f['path'], r) for f, r in zip(folders, roots) if r in real_of]
+                anchors += [(t, lp, owner(lk)) for lk, (lp, t) in links.items() if owner(lk) is not None]
+                anchors = sorted(((t.rstrip(os.sep) + os.sep, t, base, o) for t, base, o in anchors),
+                                 key=lambda x: -len(x[1]))
+                pool = {}
+                for files in prev_raw.values():
+                    for e in files:
+                        k = os.path.normcase(e[1])
+                        o = owner(k)
+                        if o is None:                # its folder was removed: find it again by where it really is
+                            for tpre, t, base, ow in anchors:
+                                if e[4] == t or e[4].startswith(tpre):
+                                    tail = e[4][len(tpre):] if e[4] != t else ''
+                                    tail = _recase(tail, e[1])  # the file and folder names as they were written
+                                    e = (e[0], os.path.join(base, tail) if tail else base, e[2], e[3], e[4])
+                                    k, o = os.path.normcase(e[1]), ow
+                                    break
+                        if o is not None:
+                            pool.setdefault(o, {}).setdefault(k, e)
+                self._pool_cache = (key, pool)
                 return pool
+            raw_prev_sig = [(r, hash(tuple(v))) for r, v in prev_raw.items()]
+            results = {}
             for f, root in zip(folders, roots):
                 # media folders inside this one, with where they really are (None: not known, it's offline)
                 others = {r: real_of.get(r) for r in roots
@@ -381,13 +397,8 @@ class Library:
                     links)
                 dirty = dirty or changed
                 if ok:
-                    # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
                     lost = errs + [os.path.normcase(o) for o in off]
-                    raw[root] = files
-                    if lost:
-                        have = {os.path.normcase(e[1]) for e in files}
-                        raw[root] = files + [e for k, e in get_pool().get(root, {}).items()
-                                             if k not in have and _under(k, lost)]
+                    results[root] = (files, lost)
                     reached.add(root)
                     all_errs += lost
                     # a hiccup holds collections back; something unreadable for over a day is how it is now
@@ -395,11 +406,23 @@ class Library:
                         since[p] = min(since.get(p, now_w), now_w)
                     errored += [p for p in lost if now_w - since[p] < ERROR_GRACE]
                     links_off += off
+            # links to nowhere any media folder holds now are forgotten
+            links = {lk: v for lk, v in links.items() if owner(lk) is not None}
+            for root, (files, lost) in results.items():
+                # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
+                raw[root] = files
+                if lost:
+                    have = {os.path.normcase(e[1]) for e in files}
+                    lset, lpre = set(lost), tuple(x.rstrip(os.sep) + os.sep for x in lost)
+                    raw[root] = files + [e for k, e in get_pool().get(root, {}).items()
+                                         if k not in have and (k in lset or k.startswith(lpre))]
             unreachable = []
             for f, root in zip(folders, roots):
-                if root not in reached:              # NAS asleep, drive not mounted yet: keep what we had ...
-                    # ... unless the folder above it was read and it isn't there (deleted, or a file): gone
-                    raw[root] = [] if _gone(f['path'], reached) else list(get_pool().get(root, {}).values())
+                if root not in reached:
+                    if _gone(f['path'], reached):    # its folder above was read and it isn't there: deleted
+                        raw[root] = []
+                        continue
+                    raw[root] = list(get_pool().get(root, {}).values())   # NAS asleep, drive not mounted yet
                     unreachable.append(f['path'])
             live = {os.path.normcase(e[1]) for files in raw.values() for e in files}
             stale = [k for k in cache if k not in live and not _under(k, errored)
@@ -796,21 +819,50 @@ class Library:
             return {'movies': movies, 'shows': show_list}
 
 
+def _recase(tail, written):
+    """tail (normcased, from a real location) with the capital letters of the same trailing names in 'written'
+    (the path it was listed under), as far as they match from the end."""
+    if not tail:
+        return tail
+    t, w = tail.split(os.sep), written.split(os.sep)
+    n = 0
+    while n < min(len(t), len(w)) and os.path.normcase(w[-1 - n]) == t[-1 - n]:
+        n += 1
+    return os.sep.join(t[:len(t) - n] + w[len(w) - n:])
+
+
 def _gone(path, reached):
-    """A media folder that wasn't reached, but whose parent folder is inside one that was: if it isn't there (or is
-    a file), it was deleted, not unplugged. Only looks when the parent's drive answered this scan."""
-    parent = os.path.dirname(os.path.normpath(path))
-    if not parent or parent == path or not _under(os.path.normcase(parent), reached):
-        return False
-    if not os.path.isdir(parent):                  # the parent is itself behind an offline link: unplugged
-        return False
+    """A media folder that wasn't reached: was it deleted (True), or is it just unplugged or asleep (False)?
+    Deleted when it's a file, or when it's missing and the nearest folder above it that exists is a real folder
+    inside a media folder this scan read. A link above it that leads nowhere means unplugged. Only looks on drives
+    that answered this scan."""
+    p = os.path.normpath(path)
     try:
-        st = os.lstat(path)
+        st = os.lstat(p)
+        if statmod.S_ISDIR(st.st_mode) or getattr(st, 'st_reparse_tag', 0):
+            return False                           # there (a folder, or a link: maybe offline)
+        return _under(os.path.normcase(os.path.dirname(p)), reached)   # a file where the folder was
     except FileNotFoundError:
-        return True
+        pass
     except OSError:
         return False
-    return not (statmod.S_ISDIR(st.st_mode) or getattr(st, 'st_reparse_tag', 0))
+    a = p
+    while True:
+        up = os.path.dirname(a)
+        if not up or up == a:
+            return False
+        a = up
+        if not _under(os.path.normcase(a), reached):
+            return False                           # above every media folder this scan read: don't touch
+        try:
+            st = os.lstat(a)
+        except FileNotFoundError:
+            continue                               # deleted too: look further up
+        except OSError:
+            return False
+        if getattr(st, 'st_reparse_tag', 0) and not os.path.isdir(a):
+            return False                           # a link that leads nowhere: unplugged
+        return statmod.S_ISDIR(st.st_mode) or bool(getattr(st, 'st_reparse_tag', 0))
 
 
 def _finite(v):
