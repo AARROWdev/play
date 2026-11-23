@@ -25,6 +25,7 @@ from . import names, skins
 SAMPLE = 64 * 1024
 OVERRIDABLE = ('title', 'year', 'kind', 'show', 'season', 'episode', 'kids', 'hidden')
 DEFAULT_PORT, PORT_MIN, PORT_MAX = 8600, 1024, 65535
+ERROR_GRACE = 24 * 3600   # a folder or file unreadable for longer is how it is now, not a hiccup
 SETTLE = 10.0       # a new file must look the same for this long (by this PC's clock) before it is fingerprinted
 STARTUP_AGE = 60.0  # at startup, files last written more than a minute ago are taken at once
 STOP_WORDS = {'the', 'and', 'of', 'a', 'an', 'movies', 'movie', 'films', 'film', 'collection', 'series', 'set',
@@ -219,8 +220,9 @@ class Library:
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._raw = {}             # normcased root -> [(fp, path, ext, size, real)] from the last walk reaching it
-        self._kids_into = set()    # fingerprints a Kids folder reaches inside another media folder (last scan)
+        self._reaches = {}         # normcased root -> fingerprints it reaches inside another media folder
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
+        self._err_since = {}       # normcased path -> when it first couldn't be read (monotonic)
         self._live_roots = set()   # roots the last walk reached (their files win over kept ones)
         self._raw_sig = None
         self._pending = {}         # normcased path -> [size, mtime_ns, first seen (monotonic)] of an unsettled file
@@ -324,7 +326,8 @@ class Library:
                     pass
             real_roots = set(real_of.values())
             raw, reached, new_pending, dirty, errored, links_off, into = {}, set(), {}, False, [], [], {}
-            by_real, listings = {}, {}
+            by_real, listings, all_errs = {}, {}, []
+            now_m = time.monotonic()
             for f, root in zip(folders, roots):
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
                 files, ok, changed, errs, off, into[root] = _walk(
@@ -337,7 +340,9 @@ class Library:
                     have = {os.path.normcase(e[1]) for e in files}
                     raw[root] = files + [e for e in keep if os.path.normcase(e[1]) not in have]
                     reached.add(root)
-                    errored += lost
+                    all_errs += errs
+                    errored += [p for p in errs if now_m - self._err_since.setdefault(p, now_m) < ERROR_GRACE]
+                    errored += [os.path.normcase(o) for o in off]
                     links_off += off
             unreachable = []
             for f, root in zip(folders, roots):
@@ -355,15 +360,19 @@ class Library:
                 self._pending = new_pending
                 self._raw = raw
                 self._live_roots = reached
-                # files a Kids folder reaches inside another media folder (a link into it, or that folder
-                # nested in it): Kids too, though the other folder's walk lists them. Worked out once per scan.
-                kids_into = [t for f, root in zip(folders, roots) if f.get('kids') for t in into.get(root, [])]
-                self._kids_into = {e[0] for files in raw.values() for e in files
-                                   if kids_into and _under(e[4], kids_into)}
+                # per media folder: the files it reaches inside another media folder (a link into it, or that
+                # folder nested in it). Worked out once per scan; _rebuild applies the Kids flags as they are now.
+                self._reaches = {}
+                for root, targets in into.items():
+                    if targets:
+                        self._reaches[root] = {e[0] for files in raw.values() for e in files
+                                               if _under(e[4], targets)}
                 # media folders and links that are offline (a subfolder Windows won't list isn't news) ...
                 self.unreachable = unreachable + sorted(set(links_off))
                 # ... but anything not fully read means "missing" can't be told from "gone" (collections keep it)
                 self._incomplete = bool(unreachable or errored)
+                failing = set(all_errs)              # forget a path once it reads again
+                self._err_since = {p: t for p, t in self._err_since.items() if p in failing}
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
@@ -447,7 +456,7 @@ class Library:
                     reals[fp] = {real}
         # a Kids folder with a link into another media folder (Kids\Cartoons -> Movies\Animated): files there
         # are Kids too, though the other folder's walk lists them
-        for fp in self._kids_into:
+        for fp in {fp for f, root in folders if f.get('kids') for fp in self._reaches.get(root, ())}:
             if fp in found and self._tag_kids_once(fp):
                 self._save_after_scan = True
                 found[fp]['kids'] = True
@@ -787,14 +796,15 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             if entries is None:
                 with os.scandir(d) as it:
                     entries = sorted(it, key=lambda e: e.name)
-                for e in entries:                  # read now (cached in the entry), so another walk reuses it
-                    try:
-                        e.is_dir()
-                        if not _dir_link(e) and not e.is_dir():
-                            e.stat()
-                    except OSError:
-                        pass
-                listings[d_real] = entries
+                if d_real != os.path.normcase(d):  # reached through a link: another walk may reach it too
+                    for e in entries:              # read now (kept in the entry), so that walk reuses it
+                        try:
+                            if not _dir_link(e) and not e.is_dir(follow_symlinks=False) and \
+                                    os.path.splitext(e.name)[1].lower() in names.VIDEO_EXTS:
+                                e.stat()
+                        except OSError:
+                            pass
+                    listings[d_real] = entries
         except OSError:
             if d == root:
                 return [], False, False, [], [], []

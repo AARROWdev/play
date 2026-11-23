@@ -817,7 +817,17 @@ def test_main_skips_autostart_for_a_portable_copy(qapp, tmp_path, monkeypatch):
 
 def test_every_address_is_in_the_tooltip(win, monkeypatch):
     monkeypatch.setattr(server, 'lan_ips', lambda: ['10.8.0.6', '192.168.56.1', '10.0.0.201', '192.168.137.1'])
+    win.resize(1600, 700)
     win._status()
-    assert '(+2 more)' in win.status.text() or '(+2 more)' in win.status.toolTip()
+    assert '(+2 more)' in win.status.text()
     for ip in ('10.0.0.201', '192.168.137.1'):
         assert ip in win.status.toolTip()
+
+
+def test_a_failed_run_key_write_offers_autostart_again(tmp_path, monkeypatch):
+    def fail(on):
+        raise PermissionError('policy')
+    monkeypatch.setattr(pa, 'set_autostart', fail)
+    lb = library.Library(str(tmp_path))
+    assert pa.offer_autostart(lb, installed=True) is False
+    assert library.Library(lb.dir).data['autostart_offered'] is False         # offered again next start

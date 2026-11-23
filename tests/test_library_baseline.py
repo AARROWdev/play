@@ -619,3 +619,39 @@ def test_a_media_folder_inside_a_kids_folder_is_kids(tmp_path):
     lb.set_folders([{'path': str(tmp_path / 'Kids'), 'kids': True}, {'path': str(tmp_path / 'Kids' / 'Shows')}])
     (ep,) = lb.items(0)
     assert ep['kids']
+
+
+# ------------------------------------------------------------------ b01b460 review
+def test_switching_kids_on_and_off_follows_a_link_into_another_folder(tmp_path):
+    make(str(tmp_path / 'Movies' / 'Animated'), 'Toy Shelf.mp4')
+    kids = tmp_path / 'Kids'
+    kids.mkdir()
+    _junction(kids / 'Cartoons', tmp_path / 'Movies' / 'Animated')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'Movies')}, {'path': str(kids)}])
+    assert not lb.items(0)[0]['kids']
+    lb.set_folders([{'path': str(tmp_path / 'Movies')}, {'path': str(kids), 'kids': True}])
+    lb.scan()
+    assert lb.current()[0]['kids']
+
+
+def test_an_error_that_lasts_stops_holding_collections(tmp_path, monkeypatch):
+    make(str(tmp_path / 'm' / 'Locked'), 'x.mkv')
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv')
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith('Locked'):
+            raise PermissionError('denied')
+        return real(p)
+    monkeypatch.setattr(library.os, 'scandir', scandir)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    lb.items(0)
+    assert lb._incomplete
+    t = library.time.monotonic()
+    monkeypatch.setattr(library.time, 'monotonic', lambda: t + library.ERROR_GRACE + 1)
+    lb.scan()
+    assert not lb._incomplete
+    lb.scan()
+    assert not lb._incomplete                      # and it stays that way

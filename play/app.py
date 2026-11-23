@@ -490,9 +490,10 @@ class Window(QMainWindow):
         self._status()
 
     def _status(self):
+        every = []
         if self.srv.running:
             tvs = self.srv.tvs()
-            every = server.lan_ips()
+            every = server.lan_ips()                 # once: the bar and the tooltip agree
             ips = every[:2]
             where = ' or '.join(f'{ip}:{self.srv.port}' for ip in ips) if ips else f'port {self.srv.port}'
             if len(every) > 2:                       # a VPN, a virtual machine adapter, Mobile Hotspot ...
@@ -514,8 +515,8 @@ class Window(QMainWindow):
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
         text = f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes)
         tip = text
-        if self.srv.running and len(server.lan_ips()) > 2:      # every address, so none is ever out of reach
-            tip += '   ·   All addresses: ' + ', '.join(f'{ip}:{self.srv.port}' for ip in server.lan_ips())
+        if len(every) > 2:                                         # every address, so none is ever out of reach
+            tip += '   ·   All addresses: ' + ', '.join(f'{ip}:{self.srv.port}' for ip in every)
         self.status.setToolTip(html.escape(tip, quote=False).replace('   ·   ', '<br>'))   # escaped: never read as markup
         # the full text is in the tooltip; the bar shows what fits
         room = self.width() - self.status_note.sizeHint().width() - 40     # the bar's width, less the fixed note
@@ -1014,11 +1015,17 @@ def offer_autostart(lib, installed):
     try:
         lib.set_value('autostart_offered', True)   # recorded first: if it can't be, nothing is switched on
     except OSError:
-        lib.data['autostart_offered'] = False
+        with lib.lock:
+            lib.data['autostart_offered'] = False
         return False
     try:
         set_autostart(True)
-    except OSError:
+    except OSError:                                # not switched on after all: offer it again next start
+        try:
+            lib.set_value('autostart_offered', False)
+        except OSError:
+            with lib.lock:
+                lib.data['autostart_offered'] = False
         return False
     return True
 

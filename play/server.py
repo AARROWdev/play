@@ -75,11 +75,15 @@ def _find_lan_ips():
         if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
             ips.append(ip)
     primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
-    # the default route first (the home network, or with a full-tunnel VPN the VPN), then 192.168.x.x (home
-    # routers), then the rest. Which one a TV is on can't be told from here (Mobile Hotspot is 192.168.137.1, a VM
-    # adapter is also x.x.x.1), so the window shows two and lists every one in its tooltip.
-    return sorted(ips, key=lambda ip: (ip != primary, not ip.startswith('192.168.'), ip.startswith('172.'),
-                                       ipaddress.ip_address(ip)))
+    # the default route first (the home network, or with a full-tunnel VPN the VPN). A VMware/VirtualBox/Hyper-V
+    # adapter gives the PC its subnet's .1 (on a home network .1 is the router), so those go last, except Mobile
+    # Hotspot's fixed 192.168.137.1, where TVs on the PC's hotspot find it. Then 192.168.x.x before the rest.
+    # The window shows two and lists every one in its tooltip.
+    return sorted(ips, key=lambda ip: (ip != primary, ip.endswith('.1') and ip != HOTSPOT_IP,
+                                       not ip.startswith('192.168.'), ip.startswith('172.'), ipaddress.ip_address(ip)))
+
+
+HOTSPOT_IP = '192.168.137.1'                         # Windows Mobile Hotspot / Internet Connection Sharing
 
 
 def _default_route_ip():
