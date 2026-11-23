@@ -12,6 +12,7 @@ Lock order: _scan_lock, then lock. Nothing ever asks for a walk while holding lo
 """
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -212,8 +213,9 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
-            'unreadable_since': {k: v for k, v in _dict(d.get('unreadable_since')).items()
-                                 if isinstance(k, str) and isinstance(v, (int, float))},
+            'unreadable_since': {k: float(v) for k, v in _dict(d.get('unreadable_since')).items()
+                                 if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool)
+                                 and math.isfinite(v)},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")
@@ -337,6 +339,7 @@ class Library:
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
                 files, ok, changed, errs, off, into[root] = _walk(
                     f['path'], others, cache, pending, new_pending, first, real_roots, real_of.get(root), by_real, listings)
+                off = [o for o in off if os.path.normcase(o) not in roots]   # a media folder of its own: its walk says
                 dirty = dirty or changed
                 if ok:
                     # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
@@ -345,10 +348,11 @@ class Library:
                     have = {os.path.normcase(e[1]) for e in files}
                     raw[root] = files + [e for e in keep if os.path.normcase(e[1]) not in have]
                     reached.add(root)
-                    lost_now = errs + [os.path.normcase(o) for o in off]
-                    all_errs += lost_now
+                    all_errs += lost
                     # a hiccup holds collections back; something unreadable for over a day is how it is now
-                    errored += [p for p in lost_now if now_w - since.setdefault(p, now_w) < ERROR_GRACE]
+                    for p in lost:                   # a time in the future (the clock was set back) starts now
+                        since[p] = min(since.get(p, now_w), now_w)
+                    errored += [p for p in lost if now_w - since[p] < ERROR_GRACE]
                     links_off += off
             unreachable = []
             for f, root in zip(folders, roots):
@@ -365,8 +369,17 @@ class Library:
                     into[root] = self._into.get(root, [])
             sig = hash(tuple((r, tuple(raw[r])) for r in sorted(raw))) ^ hash(tuple(sorted(reached))) ^ \
                 hash(tuple((r, tuple(sorted(into[r]))) for r in sorted(into)))
-            # forget a path once it reads again; one under a folder that wasn't reached keeps its clock
-            since = {p: t for p, t in since.items() if p in set(all_errs) or not _under(p, reached)}
+            # forget a path once it reads again. Kept: one still failing, one inside something this scan couldn't
+            # read (an offline link, an unlistable folder), and one whose media folder wasn't reached (NAS asleep);
+            # dropped: one in no media folder any more.
+            failing = set(all_errs)
+
+            def keep_clock(p):
+                if p in failing or _under(p, all_errs):
+                    return True
+                mine = [r for r in roots if _under(p, [r])]
+                return bool(mine) and max(mine, key=len) not in reached
+            since = {p: t for p, t in since.items() if keep_clock(p)}
             with self.lock:
                 self.fpcache = cache
                 self._pending = new_pending
@@ -446,14 +459,15 @@ class Library:
         folders = [(f, os.path.normcase(os.path.abspath(f['path']))) for f in self.data['folders']]
         # what a Kids folder reaches inside another media folder (Kids\Cartoons -> Movies\Animated) is Kids too,
         # though the other folder's walk lists it; the Kids switches as they are now
-        kids_into = [t for f, root in folders if f.get('kids') for t in self._into.get(root, ())]
+        kids_into = {t for f, root in folders if f.get('kids') for t in self._into.get(root, ())}
+        kids_pre = tuple(t.rstrip(os.sep) + os.sep for t in kids_into)          # one startswith per file
         # folders the last walk reached first: a live copy of a file beats a remembered one on a missing drive
         for live in (True, False):
             for f, root in folders:
                 if (root in self._live_roots) != live:
                     continue
                 for fp, path, ext, size, real in self._raw.get(root, []):
-                    kids = f.get('kids') or (kids_into and _under(real, kids_into))
+                    kids = f.get('kids') or (kids_into and (real in kids_into or real.startswith(kids_pre)))
                     if kids and self._tag_kids_once(fp):
                         self._save_after_scan = True
                         if fp in found:

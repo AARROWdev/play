@@ -703,6 +703,73 @@ def test_an_unreached_media_folder_keeps_its_error_clock(tmp_path, monkeypatch):
     lb.set_folders([{'path': str(tmp_path / 'nas')}])
     lb.items(0)
     first = dict(lb.data['unreadable_since'])
+    assert first
     os.rename(str(tmp_path / 'nas'), str(tmp_path / 'asleep'))
     lb.scan()                                      # the NAS sleeps
     assert lb.data['unreadable_since'] == first
+
+
+
+# ------------------------------------------------------------------ 6ae30f6 review
+def _offline_link_setup(tmp_path):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    _junction(root / 'More', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    lb.items(0)
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    return lb, root
+
+
+def test_an_offline_link_keeps_its_clock_across_scans(tmp_path):
+    lb, root = _offline_link_setup(tmp_path)
+    first = dict(lb.data['unreadable_since'])
+    assert first
+    lb.scan()
+    lb.scan()
+    assert lb.data['unreadable_since'] == first
+
+
+def test_a_future_or_broken_clock_doesnt_stick(tmp_path, monkeypatch):
+    (tmp_path / 'library.json').write_text(json.dumps({'unreadable_since': {
+        'a': True, 'b': 'x', 'c': 1e999, 'd': 5.0}}), encoding='utf-8')
+    assert library.Library(str(tmp_path)).data['unreadable_since'] == {'d': 5.0}
+    lb, root = _offline_link_setup(tmp_path / 'x')
+    key = next(iter(lb.data['unreadable_since']))
+    lb.data['unreadable_since'][key] = library.time.time() + 10 * 365 * 86400   # set ahead, then the clock fixed
+    t = library.time.time()
+    monkeypatch.setattr(library.time, 'time', lambda: t + library.ERROR_GRACE + 1)
+    lb.scan()
+    assert lb._incomplete                           # counted from now, not from the future
+    monkeypatch.setattr(library.time, 'time', lambda: t + 2 * library.ERROR_GRACE + 2)
+    lb.scan()
+    assert not lb._incomplete
+
+
+def test_a_removed_media_folder_forgets_its_clocks(tmp_path):
+    lb, root = _offline_link_setup(tmp_path)
+    assert lb.data['unreadable_since']
+    other = tmp_path / 'Other'
+    make(str(other), 'Up 2009.mkv')
+    lb.set_folders([{'path': str(other)}])
+    lb.scan()
+    assert lb.data['unreadable_since'] == {}
+
+
+def test_an_offline_media_folder_link_is_named_once(tmp_path):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    _junction(root / 'Films', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Films')}])
+    lb.items(0)
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    assert len([u for u in lb.unreachable if u.lower().endswith('films')]) == 1
+    assert not any(k.endswith('films') for k in lb.data['unreadable_since'])
