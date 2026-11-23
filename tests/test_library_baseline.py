@@ -1192,24 +1192,31 @@ def test_a_renamed_folder_with_a_sleeping_link_keeps_its_titles(tmp_path):
 
 # ------------------------------------------------------------------ 41e603e review
 def test_an_offline_link_keeps_the_target_it_had_online(tmp_path, monkeypatch):
+    # A link to a mapped drive, as Windows does it: the link itself says Z:\Movies, online it resolves to the
+    # \nas share behind Z:, offline realpath can only give back Z:\Movies.
     nas = tmp_path / 'NAS'
     make(str(nas), 'Alien 1979.mkv')
     media = tmp_path / 'Media'
     make(str(media), 'Heat 1995.mkv', b'heat' * 50)
     _junction(media / 'Films', nas)
+    films = os.path.normcase(str(media / 'Films'))
+    real_readlink, real_realpath = library.os.readlink, library.os.path.realpath
+    monkeypatch.setattr(library.os, 'readlink',
+                        lambda p: r'Z:\Movies' if os.path.normcase(str(p)) == films else real_readlink(p))
+
+    def realpath(p, *a, **k):
+        if os.path.normcase(str(p)) == films and not os.path.isdir(str(nas)):
+            return r'Z:\Movies'
+        return real_realpath(p, *a, **k)
+    monkeypatch.setattr(library.os.path, 'realpath', realpath)
     lb = library.Library(str(tmp_path / 'store'))
     lb.set_folders([{'path': str(media)}, {'path': str(nas)}])
     assert titles_now(lb) == ['Alien', 'Heat']
     os.rename(str(nas), str(tmp_path / 'asleep'))
-    real = library.os.path.realpath
-
-    def offline_realpath(p, *a, **k):                # a \\nas or mapped-drive link offline: resolves to itself
-        return str(p) if os.path.normcase(str(p)).endswith('films') else real(p, *a, **k)
-    monkeypatch.setattr(library.os.path, 'realpath', offline_realpath)
     lb.scan()
     lb.set_folders([{'path': str(media)}])           # the NAS folder is removed from Settings while it sleeps
     assert titles_now(lb) == ['Alien', 'Heat']
-    assert lb._links[os.path.normcase(str(media / 'Films'))][1] == os.path.normcase(str(nas))
+    assert lb._links[films][1] == os.path.normcase(str(nas))
 
 
 def test_switching_a_folder_from_its_link_to_its_target_while_unplugged(tmp_path):
@@ -1261,3 +1268,33 @@ def test_a_repointed_offline_junction_follows_its_new_target(tmp_path):
     assert lb._links[os.path.normcase(str(media / 'Films'))][1] == os.path.normcase(str(e))
     lb.set_folders([{'path': str(media)}])                   # D removed from Settings
     assert titles_now(lb) == ['Heat']                        # Alien isn't kept under Films any more
+
+
+
+# ------------------------------------------------------------------ f6715c4 review
+def test_an_unplugged_second_copy_keeps_the_title(tmp_path):
+    media, usb = tmp_path / 'Media', tmp_path / 'USB'
+    make(str(media), 'Alien 1979.mkv')
+    make(str(usb), 'Alien 1979.mkv')                  # the same file, twice
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(usb)}])
+    alien = next(i for i in lb.items(0) if i['title'] == 'Alien')
+    assert alien['copies'] == 2
+    os.rename(str(usb), str(tmp_path / 'unplugged'))
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.remove(str(media / 'Alien 1979.mkv'))          # "2 copies": the user deletes one
+    assert titles_now(lb) == ['Alien', 'Heat']        # the other is on the unplugged drive
+    assert not next(i for i in lb.current() if i['title'] == 'Alien').get('copies')
+
+
+def test_a_link_to_a_moved_folder_keeps_its_titles(tmp_path):
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    make(str(media / 'Kids'), 'Up 2009.mkv')
+    _junction(media / 'Cartoons', media / 'Kids')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids')}])
+    assert titles_now(lb) == ['Heat', 'Up']
+    os.rename(str(media / 'Kids'), str(tmp_path / 'KidsMoved'))   # moved out: Cartoons now leads nowhere
+    assert titles_now(lb) == ['Heat', 'Up']
