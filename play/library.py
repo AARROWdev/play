@@ -213,8 +213,8 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
-            'unreadable_since': {k: t for k, t in ((k, _finite(v)) for k, v in _dict(d.get('unreadable_since')).items()
-                                                   if isinstance(k, str)) if t is not None},
+            'unreadable_since': {k: t for k, v in _dict(d.get('unreadable_since')).items()
+                                 if isinstance(k, str) and (t := _finite(v)) is not None},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")
@@ -334,6 +334,23 @@ class Library:
             now_w = time.time()
             with self.lock:
                 since = dict(self.data['unreadable_since'])
+            # Titles that can't be read now are kept from the last scans, from one pool (whichever folder's walk
+            # saw them then), each owned by the deepest media folder that holds its path now. A reached folder
+            # keeps those under what it couldn't read (an offline link, a locked subfolder); a folder that wasn't
+            # reached keeps all of its own. So nothing is lost or credited to the wrong folder when folders are
+            # added, removed or changed while something is offline.
+            deepest_first = sorted(((r, r.rstrip(os.sep) + os.sep) for r in set(roots)), key=lambda x: -len(x[0]))
+
+            def owner(path):
+                for r, pre in deepest_first:
+                    if path == r or path.startswith(pre):
+                        return r
+                return None
+            pool = {}
+            for files in prev_raw.values():
+                for e in files:
+                    k = os.path.normcase(e[1])
+                    pool.setdefault(owner(k), {}).setdefault(k, e)
             for f, root in zip(folders, roots):
                 # media folders inside this one, with where they really are (None: not known, it's offline)
                 others = {r: real_of.get(r) for r in roots
@@ -344,9 +361,10 @@ class Library:
                 if ok:
                     # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
                     lost = errs + [os.path.normcase(o) for o in off]
-                    keep = [e for e in prev_raw.get(root, []) if _under(os.path.normcase(e[1]), lost)]
                     have = {os.path.normcase(e[1]) for e in files}
-                    raw[root] = files + [e for e in keep if os.path.normcase(e[1]) not in have]
+                    lost_pre = tuple(x.rstrip(os.sep) + os.sep for x in lost)
+                    raw[root] = files + [e for k, e in pool.get(root, {}).items()
+                                         if k not in have and lost and (k in lost or k.startswith(lost_pre))]
                     reached.add(root)
                     all_errs += lost
                     # a hiccup holds collections back; something unreadable for over a day is how it is now
@@ -357,11 +375,7 @@ class Library:
             unreachable = []
             for f, root in zip(folders, roots):
                 if root not in reached:              # NAS asleep, drive not mounted yet: keep what we had
-                    if root in prev_raw:
-                        raw[root] = prev_raw[root]
-                    else:                            # just added, never read: what other folders' walks saw in it
-                        raw[root] = [e for r, files in prev_raw.items() if r != root for e in files
-                                     if _under(os.path.normcase(e[1]), [root])]
+                    raw[root] = list(pool.get(root, {}).values())
                     unreachable.append(f['path'])
             live = {os.path.normcase(e[1]) for files in raw.values() for e in files}
             stale = [k for k in cache if k not in live and not _under(k, errored)
@@ -378,8 +392,6 @@ class Library:
             # dropped: one in no media folder any more.
             lost_set = set(all_errs)
             lost_pre = tuple(x.rstrip(os.sep) + os.sep for x in lost_set)
-            deepest_first = sorted(((r, r.rstrip(os.sep) + os.sep) for r in set(roots)), key=lambda x: -len(x[0]))
-
             def keep_clock(p):
                 if p in lost_set or p.startswith(lost_pre):
                     return True
@@ -877,8 +889,9 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
                     continue
                 key = os.path.normcase(path)
                 sub_real = os.path.join(d_real, os.path.normcase(e.name))
-                if key in skip_roots:              # a media folder of its own inside this one
-                    into_roots.append(skip_roots[key] or sub_real)
+                own = skip_roots.get(key, False)
+                if own is not False:               # a media folder of its own inside this one
+                    into_roots.append(own or sub_real)
                     continue
                 if d_real != os.path.normcase(d) and (sub_real in visited or sub_real in other_roots):
                     if sub_real in other_roots:    # under a link: another media folder, which walks it

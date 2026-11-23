@@ -880,3 +880,52 @@ def test_a_kids_link_that_is_also_its_own_folder_makes_its_films_kids(tmp_path):
     lb.set_folders([{'path': str(kids), 'kids': True}, {'path': str(kids / 'Cartoons')}])
     (ts,) = lb.items(0)
     assert ts['kids']
+
+
+
+# ------------------------------------------------------------------ 810cdfe review
+def _media_with_offline_films(tmp_path, folders_before):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    make(str(films / 'Sub'), 'Brazil 1985.mkv', b'brazil' * 50)
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(root / 'Films', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root / p) if p else str(root)} for p in folders_before])
+    lb.items(0)
+    os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    return lb, root
+
+
+def titles(lb):
+    return sorted(i['title'] for i in lb.current())
+
+
+def test_case_c_switching_to_the_parent_folder_while_offline(tmp_path):
+    lb, root = _media_with_offline_films(tmp_path, ['Films'])
+    assert titles(lb) == ['Alien', 'Brazil']
+    lb.set_folders([{'path': str(root)}])
+    lb.scan()
+    assert titles(lb) == ['Alien', 'Brazil', 'Heat']
+
+
+def test_case_d_removing_the_offline_folder(tmp_path):
+    lb, root = _media_with_offline_films(tmp_path, ['', 'Films'])
+    assert titles(lb) == ['Alien', 'Brazil', 'Heat']
+    lb.set_folders([{'path': str(root)}])
+    lb.scan()
+    assert titles(lb) == ['Alien', 'Brazil', 'Heat']
+
+
+def test_case_e_a_title_stays_with_the_deepest_folder(tmp_path):
+    lb, root = _media_with_offline_films(tmp_path, ['', r'Films\Sub'])
+    assert titles(lb) == ['Alien', 'Brazil', 'Heat']
+    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Films' / 'Sub')}, {'path': str(root / 'Films')}])
+    lb.scan()
+    assert titles(lb) == ['Alien', 'Brazil', 'Heat']
+    sub = os.path.normcase(str(root / 'Films' / 'Sub'))
+    films = os.path.normcase(str(root / 'Films'))
+    assert [os.path.basename(e[1]) for e in lb._raw[sub]] == ['Brazil 1985.mkv']
+    assert [os.path.basename(e[1]) for e in lb._raw[films]] == ['Alien 1979.mkv']
