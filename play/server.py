@@ -46,8 +46,8 @@ _ips_cache = (0.0, [])
 def lan_ips(max_age=30.0):
     """This PC's private IPv4 addresses (what a TV would type), most likely first: the default route, then
     192.168.x.x, then the rest. A Tailscale/CGNAT address (100.64.0.0/10) is never offered. A VPN's or a virtual
-    machine adapter's private address can't be told from the home network's by its number, so the window shows up to
-    three. Cached for 30 s (the window asks every 1.5 s); forget_lan_ips() starts over."""
+    machine adapter's or Mobile Hotspot's private address can't be told from the home network's by its number, so
+    the window shows two and lists them all in its tooltip. Cached for 30 s (the window asks every 1.5 s); forget_lan_ips() starts over."""
     global _ips_cache
     t, ips = _ips_cache
     if time.monotonic() - t < max_age and t:
@@ -75,11 +75,11 @@ def _find_lan_ips():
         if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
             ips.append(ip)
     primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
-    # the default route first (the home network, or with a full-tunnel VPN the VPN). A VMware/VirtualBox/Hyper-V
-    # adapter gives the PC the subnet's .1 (on a real network .1 is the router, never this PC), so those go last;
-    # then 192.168.x.x (home routers) before the rest, so the home address is among those shown in each case.
-    return sorted(ips, key=lambda ip: (ip != primary, ip.endswith('.1'), not ip.startswith('192.168.'),
-                                       ip.startswith('172.'), ipaddress.ip_address(ip)))
+    # the default route first (the home network, or with a full-tunnel VPN the VPN), then 192.168.x.x (home
+    # routers), then the rest. Which one a TV is on can't be told from here (Mobile Hotspot is 192.168.137.1, a VM
+    # adapter is also x.x.x.1), so the window shows two and lists every one in its tooltip.
+    return sorted(ips, key=lambda ip: (ip != primary, not ip.startswith('192.168.'), ip.startswith('172.'),
+                                       ipaddress.ip_address(ip)))
 
 
 def _default_route_ip():

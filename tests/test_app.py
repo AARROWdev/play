@@ -784,3 +784,40 @@ def test_main_offers_autostart_to_the_installed_copy(qapp, tmp_path, monkeypatch
     with pytest.raises(Stop):
         pa.main(['PLAY.exe', '--tray'])
     assert calls == [(str(tmp_path), True)]
+
+
+def test_autostart_isnt_switched_on_when_the_flag_cant_be_saved(tmp_path, monkeypatch):
+    writes = []
+    monkeypatch.setattr(pa, 'set_autostart', lambda on: writes.append(on))
+    lb = library.Library(str(tmp_path))
+
+    def fail(*a):
+        raise PermissionError('read-only file')
+    monkeypatch.setattr(library, '_write_text', fail)
+    assert pa.offer_autostart(lb, installed=True) is False and writes == []
+    assert pa.offer_autostart(lb, installed=True) is False and writes == []      # every start: still nothing
+
+
+def test_main_skips_autostart_for_a_portable_copy(qapp, tmp_path, monkeypatch):
+    class Stop(Exception):
+        pass
+    seen = []
+    monkeypatch.setattr(pa, 'QApplication', lambda argv: qapp)
+    monkeypatch.setattr(pa, 'settle_instance', lambda: pa.instance.NONE)
+    monkeypatch.setattr(pa, 'start_listener', lambda on_show: None)
+    real_lib = library.Library
+    monkeypatch.setattr(pa.library, 'Library', lambda *a: real_lib(str(tmp_path)))
+    monkeypatch.setattr(pa.server, 'PlayServer', lambda *a, **k: type('S', (), {'start': lambda s: None})())
+    monkeypatch.setattr(pa, 'installed_copy', lambda: False)
+    monkeypatch.setattr(pa, 'offer_autostart', lambda lib, installed: seen.append(installed) or (_ for _ in ()).throw(Stop()))
+    with pytest.raises(Stop):
+        pa.main(['PLAY.exe', '--tray'])
+    assert seen == [False]
+
+
+def test_every_address_is_in_the_tooltip(win, monkeypatch):
+    monkeypatch.setattr(server, 'lan_ips', lambda: ['10.8.0.6', '192.168.56.1', '10.0.0.201', '192.168.137.1'])
+    win._status()
+    assert '(+2 more)' in win.status.text() or '(+2 more)' in win.status.toolTip()
+    for ip in ('10.0.0.201', '192.168.137.1'):
+        assert ip in win.status.toolTip()

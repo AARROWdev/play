@@ -443,7 +443,7 @@ def test_unreachable_lists_offline_links(tmp_path):
     lb.items(0)
     os.rename(str(films), str(tmp_path / 'gone'))
     lb.scan()
-    assert any(u.lower().endswith('more') for u in lb.unreachable)      # named by the link in the media folder
+    assert str(root / 'More') in lb.unreachable                       # named by the link, as typed
 
 
 # ------------------------------------------------------------------ 6b46edd review
@@ -575,3 +575,47 @@ def test_a_shared_target_is_fingerprinted_once(tmp_path, monkeypatch):
 def test_autostart_offered_for_a_broken_store(tmp_path):
     (tmp_path / 'library.json').write_text('{not json', encoding='utf-8')
     assert library.Library(str(tmp_path)).data['autostart_offered'] is True
+
+
+# ------------------------------------------------------------------ b44a105 review
+def test_a_locked_file_keeps_its_collection_place(tmp_path, monkeypatch):
+    make(str(tmp_path / 'm'), 'Alien 1979.mkv')
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv', b'heat' * 100)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    ids = [i['id'] for i in lb.items(0)]
+    cid = lb.make_collection('Faves', ids, order='custom')
+    for f in os.listdir(lb.dir):
+        if f.startswith('fingerprints'):
+            os.remove(os.path.join(lb.dir, f))                 # the fingerprint cache is lost
+    real = library.fingerprint
+
+    def fp(p, n):
+        if 'Alien' in p:
+            raise PermissionError('in use')
+        return real(p, n)
+    monkeypatch.setattr(library, 'fingerprint', fp)
+    lb2 = library.Library(lb.dir)
+    lb2.scan()
+    shown = [m['id'] for m in lb2.collection_members(cid)]
+    lb2.update_collection(cid, members=shown, shown=shown)
+    assert lb2.data['collections'][cid]['members'] == ids
+
+
+def test_a_kids_link_to_a_folder_above_another_media_folder(tmp_path):
+    make(str(tmp_path / 'Media' / 'Movies'), 'Toy Shelf.mp4')
+    kids = tmp_path / 'Kids'
+    kids.mkdir()
+    _junction(kids / 'All', tmp_path / 'Media')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'Media' / 'Movies')}, {'path': str(kids), 'kids': True}])
+    (ts,) = lb.items(0)
+    assert ts['kids'] and not ts.get('copies')
+
+
+def test_a_media_folder_inside_a_kids_folder_is_kids(tmp_path):
+    make(str(tmp_path / 'Kids' / 'Shows'), 'Bluey S01E01.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'Kids'), 'kids': True}, {'path': str(tmp_path / 'Kids' / 'Shows')}])
+    (ep,) = lb.items(0)
+    assert ep['kids']

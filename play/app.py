@@ -492,8 +492,11 @@ class Window(QMainWindow):
     def _status(self):
         if self.srv.running:
             tvs = self.srv.tvs()
-            ips = server.lan_ips()[:3]
+            every = server.lan_ips()
+            ips = every[:2]
             where = ' or '.join(f'{ip}:{self.srv.port}' for ip in ips) if ips else f'port {self.srv.port}'
+            if len(every) > 2:                       # a VPN, a virtual machine adapter, Mobile Hotspot ...
+                where += f' (+{len(every) - 2} more)'
             t = f'●  Serving at {where}'
             t += f'   ·   {plural(len(tvs), "TV")} connected' if tvs else '   ·   waiting for a TV'
         else:
@@ -510,7 +513,10 @@ class Window(QMainWindow):
             notes.append('Settings are not being saved (see the warning at start)')
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
         text = f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes)
-        self.status.setToolTip(html.escape(text, quote=False).replace('   ·   ', '<br>'))   # escaped: never read as markup
+        tip = text
+        if self.srv.running and len(server.lan_ips()) > 2:      # every address, so none is ever out of reach
+            tip += '   ·   All addresses: ' + ', '.join(f'{ip}:{self.srv.port}' for ip in server.lan_ips())
+        self.status.setToolTip(html.escape(tip, quote=False).replace('   ·   ', '<br>'))   # escaped: never read as markup
         # the full text is in the tooltip; the bar shows what fits
         room = self.width() - self.status_note.sizeHint().width() - 40     # the bar's width, less the fixed note
         self.status.setText(self.status.fontMetrics().elidedText(text, Qt.ElideRight, max(200, room)))
@@ -1006,9 +1012,13 @@ def offer_autostart(lib, installed):
     if not installed or lib.data['autostart_offered'] or lib.read_only:
         return False
     try:
+        lib.set_value('autostart_offered', True)   # recorded first: if it can't be, nothing is switched on
+    except OSError:
+        lib.data['autostart_offered'] = False
+        return False
+    try:
         set_autostart(True)
-        lib.set_value('autostart_offered', True)
-    except OSError:                    # registry or settings file not writable now: try again next start
+    except OSError:
         return False
     return True
 
