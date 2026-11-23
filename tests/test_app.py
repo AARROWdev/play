@@ -1084,8 +1084,8 @@ def test_the_style_is_set_once_and_the_stylesheet_once_per_skin(qapp, monkeypatc
     def set_sheet(self, *a):
         calls['sheet'] += 1
         return real_sheet(self, *a)
+    qapp.setStyleSheet('')                          # (no stylesheet style wrapping the one about to be replaced)
     QApplication.setStyle('Windows')                # start from another style, as a fresh app does
-    qapp.setStyleSheet('')
     monkeypatch.setattr(QApplication, 'setStyle', set_style)
     monkeypatch.setattr(QApplication, 'setStyleSheet', set_sheet)
     monkeypatch.setattr(suite_style, '_fusion_for', None)
@@ -1238,3 +1238,113 @@ def test_add_to_kids_offers_what_isnt_kids_and_marks_the_picks(win, monkeypatch)
     assert all(not win.lib.by_id(i)['kids'] or i == target['id'] for i in offered)
     assert not any(i['kids'] and i['id'] in offered and i['id'] != target['id'] for i in win.lib._items)
     assert win.lib.by_id(target['id'])['kids']
+
+
+
+# ------------------------------------------------------------------ the Year box; ad76dbc review
+def test_the_year_box_sets_a_films_year(win):
+    film = next(i for i in win.lib._items if i['kind'] == 'movie' and not i.get('year'))
+    win._detail_for([film])
+    assert win.d_year.isEnabled() and win.d_year.text() == ''
+    win.d_year.setText('1995')
+    win._year_done()
+    assert win.lib.by_id(film['id'])['year'] == 1995
+    win._detail_for([win.lib.by_id(film['id'])])
+    win.d_year.setText('')                          # cleared: no year again
+    win._year_done()
+    assert not win.lib.by_id(film['id']).get('year')
+    win._detail_for([win.lib.by_id(film['id'])])
+    win.d_year.setText('12')                        # not a year: left as it was
+    win._year_done()
+    assert not win.lib.by_id(film['id']).get('year')
+    episode = next(i for i in win.lib._items if i['kind'] == 'episode')
+    win._detail_for([episode])
+    assert not win.d_year.isEnabled()               # (episodes: no year box)
+
+
+def test_select_all_shown_counts_once(win, monkeypatch):
+    items = [dict(win.lib._items[0], id=f'{n:016x}', title=f'Film {n}') for n in range(2000)]
+    d = pa.PickDialog(win, 'Add', items, 'Pick')
+    calls = []
+    real = pa.PickDialog._count
+    monkeypatch.setattr(pa.PickDialog, '_count', lambda self: calls.append(1) or real(self))
+    t = pa.time.monotonic() if hasattr(pa, 'time') else __import__('time').monotonic()
+    d._tick_shown(pa.Qt.Checked)
+    assert len(calls) == 1 and len(d.picked()) == 2000
+    d._tick_shown(pa.Qt.Unchecked)
+    assert len(calls) == 2 and d.picked() == []
+    d.deleteLater()
+
+
+def test_add_to_kids_leaves_out_hidden_titles_and_says_why_when_empty(win, monkeypatch):
+    hidden = next(i for i in win.lib._items if not i['kids'])
+    win.lib.set_item(hidden['id'], hidden=True)
+    offered = []
+    real_init = pa.PickDialog.__init__
+
+    def spy(self, parent, title, items, *a, **k):
+        offered.extend(i['id'] for i in items)
+        real_init(self, parent, title, items, *a, **k)
+    monkeypatch.setattr(pa.PickDialog, '__init__', spy)
+    monkeypatch.setattr(pa.PickDialog, 'exec', lambda self: QDialog.Rejected)
+    win.add_to_kids()
+    assert offered and hidden['id'] not in offered
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    monkeypatch.setattr(win.lib, '_scanned', 0)
+    win.add_to_kids()
+    assert 'still reading' in told[-1]
+
+
+def test_deleting_a_collection_can_be_called_off(win, monkeypatch):
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    cid = win.lib.make_collection('Comedy', [i['id'] for i in films])
+    monkeypatch.setattr(pa, 'ask', lambda *a: False)
+    d = pa.CollectionDialog(win, win.lib, cid)
+    d._delete()
+    assert cid in win.lib.data['collections']
+    d.deleteLater()
+
+
+def test_a_suggestion_named_like_a_collection_joins_it(win, monkeypatch):
+    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: None)
+    films = [i for i in win.lib._items if i['title'].startswith('Jungle')]
+    cid = win.lib.make_collection('Jungle', [films[0]['id']])
+    win.suggestion = {'name': 'Jungle', 'members': [i['id'] for i in films[1:]], 'key': 'x'}
+    win._make_suggested()
+    assert list(win.lib.data['collections']) == [cid]
+    assert sorted(win.lib.data['collections'][cid]['members']) == sorted(i['id'] for i in films)
+
+
+def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch):
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    cid = win.lib.make_collection('Comedy', [films[0]['id'], films[1]['id']])
+    win.lib.data['collections'][cid]['members'].append('ffffffffffffffff')   # a film on a drive that's away
+    win.lib._incomplete = True                      # (that drive isn't read this time: the film is kept)
+    d = pa.CollectionDialog(win, win.lib, cid)
+    for _ in range(d.list.count()):
+        d.list.item(0).setSelected(True)
+        d._remove()
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    d._save()
+    assert told == [] and 'ffffffffffffffff' in win.lib.data['collections'][cid]['members']
+    d.deleteLater()
+
+
+def test_episode_lines_dont_repeat_the_file_name():
+    base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'last': 1}
+    assert pa.title_line(dict(base, title='Ann Droid S01E01')) == 'Ann Droid · S1 E1'
+    assert pa.title_line(dict(base, title='The Pool')) == 'Ann Droid · S1 E1 · The Pool'
+    assert pa.title_line(dict(base, title='Two Parter', episode=3, last=4)) == 'Ann Droid · S1 E3-E4 · Two Parter'
+
+
+def test_the_dropdowns_new_collection_opens_the_window(win, monkeypatch):
+    shown = []
+    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: shown.append(d))
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    win.sel = films
+    win.d_col.addItem('New collection…', '__new__')
+    win.d_col.setCurrentIndex(win.d_col.count() - 1)
+    win._col_picked(0)
+    assert isinstance(shown[0], pa.CollectionDialog) and sorted(shown[0].ids()) == sorted(i['id'] for i in films)

@@ -1454,3 +1454,64 @@ def test_settings_saved_before_the_first_scan_keep_an_older_kids_folder(tmp_path
     make(str(kids), 'Heat 1995.mkv', b'heat' * 50)
     lb.scan()
     assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']
+
+
+
+# ------------------------------------------------------------------ 96e83f3 review
+def _legacy_with_locked(tmp_path, monkeypatch):
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    make(str(kids / 'Locked'), 'Cars 2006.mkv', b'cars' * 50)
+    store = tmp_path / 'store'
+    store.mkdir()
+    (store / 'library.json').write_text(json.dumps({'folders': [{'path': str(kids), 'kids': True}]}),
+                                        encoding='utf-8')
+    real = os.scandir
+    _locked_scandir(monkeypatch)
+    lb = library.Library(str(store))
+    lb.items(0)
+    assert lb.data['kids_pending']
+    return lb, kids, real
+
+
+def test_a_pending_part_waits_for_its_files_to_settle(tmp_path, monkeypatch):
+    lb, kids, real = _legacy_with_locked(tmp_path, monkeypatch)
+    monkeypatch.setattr(library.os, 'scandir', real)
+    monkeypatch.setattr(library, 'SETTLE', 3600)                           # (Cars was just written: still settling)
+    lb.scan()
+    assert lb.data['kids_pending']                                          # not done: nothing of it read yet
+    monkeypatch.setattr(library, 'SETTLE', 0)
+    lb.scan()
+    assert lb.data['kids_pending'] == []
+    assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
+
+
+def test_a_pending_part_waits_while_its_drive_is_away(tmp_path, monkeypatch):
+    lb, kids, real = _legacy_with_locked(tmp_path, monkeypatch)
+    monkeypatch.setattr(library.os, 'scandir', real)
+    os.rename(str(kids), str(tmp_path / 'unplugged'))
+    lb.scan()
+    assert lb.data['kids_pending']                                          # kept while the drive is out
+    os.rename(str(tmp_path / 'unplugged'), str(kids))
+    lb.scan()
+    assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
+
+
+def test_a_pending_link_into_another_media_folder_is_tagged(tmp_path, monkeypatch):
+    movies = tmp_path / 'Movies'
+    make(str(movies / 'Animated'), 'Cars 2006.mkv', b'cars' * 50)
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    _junction(kids / 'Cartoons', movies / 'Animated')
+    store = tmp_path / 'store'
+    store.mkdir()
+    (store / 'library.json').write_text(json.dumps({'folders': [{'path': str(movies)}, {'path': str(kids),
+                                                                                        'kids': True}]}),
+                                        encoding='utf-8')
+    lb = library.Library(str(store))
+    lb.data['kids_pending'] = [os.path.normcase(str(kids / 'Cartoons'))]   # left pending when it retired
+    lb.data['folders'][1]['kids'] = False
+    lb._legacy_kids.clear()
+    lb.items(0)
+    assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
+    assert lb.data['kids_pending'] == []

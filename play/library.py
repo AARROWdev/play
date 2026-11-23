@@ -245,10 +245,10 @@ class Library:
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
             'unreadable_since': {k: t for k, v in _dict(d.get('unreadable_since')).items()
                                  if isinstance(k, str) and (t := _finite(v)) is not None},
-            # TV serial -> its developer password, encrypted for this Windows user (Set up TVs)
             # parts of an older Kids folder still to be read (their files are tagged Kids once, when read)
             'kids_pending': [p for p in d.get('kids_pending', []) if isinstance(p, str)]
                             if isinstance(d.get('kids_pending'), list) else [],
+            # TV serial -> its developer password, encrypted for this Windows user (Set up TVs)
             'tv_passwords': {k: v for k, v in _dict(d.get('tv_passwords')).items()      # serial@address only
                              if isinstance(k, str) and isinstance(v, str) and '@' in k},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
@@ -550,15 +550,30 @@ class Library:
                 # once, when a scan reads them
                 if self.data['kids_pending']:
                     lost_now = set(all_lost)
-                    done = [p for p in self.data['kids_pending']
-                            if not any(p == x or _under(p, [x]) or _under(x, [p]) for x in lost_now)]
+
+                    def readable_now(p):
+                        """Read in full this scan: its media folder was reached (or is gone for good), nothing of
+                        it was lost, and no file in it is still settling (not fingerprinted yet)."""
+                        mine = owner(p)
+                        if mine is not None and mine not in reached and mine not in gone:
+                            return False             # its folder is asleep or unplugged: later
+                        if any(p == x or _under(p, [x]) or _under(x, [p]) for x in lost_now):
+                            return False
+                        return not any(_under(k, [p]) for k in sc.new_pending)
+                    done = [p for p in self.data['kids_pending'] if readable_now(p)]
                     if done:
                         pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
+                        # a pending link into another media folder: its files are listed under that folder's
+                        # paths, so they're found by where the link leads
+                        targets = [links[p][1] for p in done if p in links]
+                        tpre = tuple(t.rstrip(os.sep) + os.sep for t in targets)
                         tagged = False
                         for files in raw.values():
                             for e in files:
                                 k = os.path.normcase(e[1])
-                                if (k in done or k.startswith(pre)) and (e[0], e[1]) not in kept:
+                                hit = k in done or k.startswith(pre) or (targets and (e[5] in targets or
+                                                                                     e[5].startswith(tpre)))
+                                if hit and (e[0], e[1]) not in kept:
                                     tagged = self._tag_kids_once(e[0]) or tagged
                         if tagged:
                             self._rebuild()

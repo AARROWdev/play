@@ -1,12 +1,14 @@
 """PLAY for Windows: the library window, settings and tray icon. The movie server runs inside this program."""
 import html
 import os
+import re
 import subprocess
 import sys
 import threading
 
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (QAction, QColor, QIcon, QIntValidator, QPainter, QPainterPath, QPixmap, QStandardItem,
+                           QStandardItemModel)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -301,10 +303,18 @@ class SettingsDialog(QDialog):
 
 
 def title_line(i):
-    """How a title reads in a pick list: "Heat (1995)", "Bluey · S1 E3 · The Pool"."""
+    """How a title reads in a pick list: "Heat (1995)", "Bluey · S1 E3 · The Pool", "Bluey · S1 E3-E4"."""
     if i['kind'] == 'episode':
         season = 'Specials' if i.get('season') == 0 else f"S{i.get('season')}"
-        return f"{i['show']} · {season} E{i.get('episode')} · {i['title']}"
+        ep = f"E{i.get('episode')}"
+        if i.get('last') and i['last'] != i.get('episode'):
+            ep += f"-E{i['last']}"
+        line = f"{i['show']} · {season} {ep}"
+        t = i['title'].strip()
+        # the episode's own name, unless it is only the file name again (the show and its SxxEyy)
+        if t and not t.casefold().startswith(i['show'].casefold()) and not re.search(r'(?i)\bs\d+\s*e\d+', t):
+            line += f' · {t}'
+        return line
     return f"{i['title']} ({i['year']})" if i.get('year') else i['title']
 
 
@@ -361,10 +371,15 @@ class PickDialog(QDialog):
             it.setHidden(bool(q) and q not in it.text().lower())
 
     def _tick_shown(self, state):
-        for r in range(self.list.count()):
-            it = self.list.item(r)
-            if not it.isHidden():
-                it.setCheckState(state)
+        self.list.blockSignals(True)                   # (a count per row would be slow on a big library)
+        try:
+            for r in range(self.list.count()):
+                it = self.list.item(r)
+                if not it.isHidden():
+                    it.setCheckState(state)
+        finally:
+            self.list.blockSignals(False)
+        self._count()
 
     def picked(self):
         return [self.list.item(r).data(ID) for r in range(self.list.count())
@@ -490,7 +505,9 @@ class CollectionDialog(QDialog):
         if not name:
             QMessageBox.information(self, 'Collection', 'Give it a name (the TV shows it).')
             return
-        if not members:
+        offline = [m for m in self.lib.data['collections'].get(self.cid, {}).get('members', [])
+                   if m not in self.shown] if self.cid else []        # on a drive that's away: kept as they are
+        if not members and not offline:
             QMessageBox.information(self, 'Collection', 'Add at least one film (+ Add films).')
             return
         same = next((k for k, c in self.lib.data['collections'].items()
@@ -518,6 +535,7 @@ class Window(QMainWindow):
         self.drawn = None
         self.sel = []
         self._title_for = None
+        self._year_for = None
         self._ep_dirty_for = None
         self._filling = False
         self._told = False
@@ -650,6 +668,18 @@ class Window(QMainWindow):
         self.d_title = QLineEdit()
         self.d_title.editingFinished.connect(self._title_done)
         v.addWidget(self.d_title)
+        yr = QHBoxLayout()
+        yr.addWidget(QLabel('Year'))
+        self.d_year = QLineEdit()
+        self.d_year.setPlaceholderText('none')
+        self.d_year.setMaxLength(4)
+        self.d_year.setFixedWidth(70)
+        self.d_year.setValidator(QIntValidator(0, 9999, self))
+        self.d_year.setToolTip('The release year: shown on the TV, and it puts collections in release order')
+        self.d_year.editingFinished.connect(self._year_done)
+        yr.addWidget(self.d_year)
+        yr.addStretch()
+        v.addLayout(yr)
         row = QHBoxLayout()
         self.d_movie, self.d_show = QPushButton('Movie'), QPushButton('Show'),
         self.d_kids, self.d_hide = QPushButton('Kids'), QPushButton('Hide')
@@ -974,6 +1004,10 @@ class Window(QMainWindow):
             return
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
         self.d_title.setEnabled(bool(one))
+        self.d_year.setEnabled(bool(one) and one['kind'] == 'movie')
+        if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
+            self.d_year.setText(str(one.get('year') or '') if one and one['kind'] == 'movie' else '')
+        self._year_for = one['id'] if one else None
         same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
             self.d_title.setText(one['title'] if one else '')
@@ -1011,6 +1045,18 @@ class Window(QMainWindow):
     def _set_all(self, **kv):
         self.lib.set_items([i['id'] for i in self.sel], **kv)
         self.refresh()
+
+    def _year_done(self):
+        if len(self.sel) == 1 and self.sel[0]['kind'] == 'movie':
+            text = self.d_year.text().strip()
+            year = int(text) if text else None
+            if year is not None and not 1900 <= year <= 2100:
+                self.d_year.setText(str(self.sel[0].get('year') or ''))   # not a year: back as it was
+                return
+            if year != self.sel[0].get('year'):
+                self.lib.set_item(self.sel[0]['id'], year=year)
+                self.refresh()
+        self.d_year.setModified(False)
 
     def _title_done(self):
         changed = False
@@ -1168,18 +1214,19 @@ class Window(QMainWindow):
         """Pick titles from the whole library (those not Kids yet) and mark them Kids."""
         if self.busy():
             return
-        rest = [i for i in self.lib._items if not i['kids']]
+        if not self.lib._scanned:
+            QMessageBox.information(self, 'Add to Kids', 'PLAY is still reading your folders. Try again in a moment.')
+            return
+        rest = [i for i in self.lib._items if not i['kids'] and not i['hidden']]   # (hidden ones never show)
         if not rest:
-            QMessageBox.information(self, 'Add to Kids', 'Everything in the library is in Kids already.')
+            QMessageBox.information(self, 'Add to Kids', 'Everything in the library is in Kids already.'
+                                    if self.lib._items else 'There is nothing in the library yet.')
             return
         d = PickDialog(self, 'Add to Kids', rest, 'Tick what should show in KIDS on the TV. Search a show\'s name '
                        'and use Select all shown to add all its episodes.', button='Add to Kids')
-        try:
-            if d.exec() != QDialog.Accepted:
-                return
-            ids = d.picked()
-        finally:
-            d.deleteLater()
+        if run_dialog(d) != QDialog.Accepted:          # (deleted later: picked() still answers now)
+            return
+        ids = d.picked()
         if ids:
             self.lib.set_items(ids, kids=True)
             self.refresh()
@@ -1187,7 +1234,15 @@ class Window(QMainWindow):
     def _make_suggested(self):
         s = self.suggestion
         if s:
-            cid = self.lib.make_collection(s['name'], s['members'])
+            same = next((k for k, c in self.lib.data['collections'].items()
+                         if c['name'].strip().casefold() == s['name'].strip().casefold()), None)
+            if same:                                   # one of that name exists: these films join it
+                if not self._moves_ok(s['members'], into=same):
+                    return
+                self._add_to_collection(same, s['members'])
+                cid = same
+            else:
+                cid = self.lib.make_collection(s['name'], s['members'])
             self.refresh()
             run_dialog(CollectionDialog(self, self.lib, cid))
             self._changed()                            # redraws only if the dialog changed something
