@@ -763,3 +763,24 @@ def test_installed_copy_is_where_the_uninstaller_is(tmp_path):
     assert not pa.installed_copy(str(d / 'PLAY.exe'))            # portable, or opened from a zip
     (d / 'unins000.exe').write_bytes(b'')
     assert pa.installed_copy(str(d / 'PLAY.exe'))                 # a custom install folder still counts
+
+
+def test_main_offers_autostart_to_the_installed_copy(qapp, tmp_path, monkeypatch):
+    class Stop(Exception):
+        pass
+    calls = []
+
+    def offer(lib, installed):
+        calls.append((lib.dir, installed))
+        raise Stop                                   # main got this far: the wiring is what's under test
+    monkeypatch.setattr(pa, 'QApplication', lambda argv: qapp)
+    monkeypatch.setattr(pa, 'settle_instance', lambda: pa.instance.NONE)
+    monkeypatch.setattr(pa, 'start_listener', lambda on_show: None)
+    real_lib = library.Library
+    monkeypatch.setattr(pa.library, 'Library', lambda *a: real_lib(str(tmp_path)))
+    monkeypatch.setattr(pa.server, 'PlayServer', lambda *a, **k: type('S', (), {'start': lambda s: None})())
+    monkeypatch.setattr(pa, 'installed_copy', lambda: True)
+    monkeypatch.setattr(pa, 'offer_autostart', offer)
+    with pytest.raises(Stop):
+        pa.main(['PLAY.exe', '--tray'])
+    assert calls == [(str(tmp_path), True)]

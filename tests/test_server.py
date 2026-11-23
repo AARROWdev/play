@@ -351,6 +351,8 @@ def test_shown_addresses_include_home_with_a_vpn_and_with_a_vm_adapter(monkeypat
     assert setup('10.8.0.6', ['10.8.0.6', '192.168.1.20']) == ['10.8.0.6', '192.168.1.20']
     # a VMware/VirtualBox host-only 192.168 adapter: the real default-route address stays first
     assert setup('10.0.0.201', ['10.0.0.201', '192.168.56.1', '192.168.80.1'])[0] == '10.0.0.201'
+    # a VPN default route plus two VM adapters: home (10.x) is still second
+    assert setup('10.8.0.6', ['10.8.0.6', '192.168.56.1', '192.168.80.1', '10.0.0.201']) == ['10.8.0.6', '10.0.0.201']
 
 
 

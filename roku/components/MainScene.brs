@@ -547,7 +547,6 @@ function fmtTime(sec as integer) as string
     return mm + ":" + ss
 end function
 
-' Every 30 s of playback the spot is saved, so Home or switching the TV off still resumes about where it stopped.
 ' While playing, the spot is saved every 30 s, so Home or switching the TV off still resumes about where it stopped.
 sub onPosition()
     if m.current = invalid or m.video.state <> "playing" then return

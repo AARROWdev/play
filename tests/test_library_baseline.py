@@ -508,3 +508,70 @@ def test_an_upgraded_store_counts_autostart_as_offered(tmp_path):
     assert library.Library(str(tmp_path)).data['autostart_offered'] is True
     fresh = tmp_path / 'new'
     assert library.Library(str(fresh)).data['autostart_offered'] is False
+
+
+# ------------------------------------------------------------------ 0401def review
+def test_appledouble_files_and_dot_links_are_skipped(tmp_path):
+    root = tmp_path / 'm'
+    make(str(root), 'Heat 1995.mkv')
+    make(str(root), '._Heat 1995.mkv', b'apple' * 10)
+    make(str(tmp_path / 'snap'), 'Old 1990.mkv')
+    _junction(root / '.snapshots', tmp_path / 'snap')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    assert [i['title'] for i in lb.items(0)] == ['Heat']
+
+
+def test_a_kids_link_into_another_media_folder_makes_those_kids(tmp_path):
+    make(str(tmp_path / 'Movies' / 'Animated'), 'Toy Shelf.mp4')
+    make(str(tmp_path / 'Movies'), 'Heat 1995.mkv')
+    kids = tmp_path / 'Kids'
+    kids.mkdir()
+    _junction(kids / 'Cartoons', tmp_path / 'Movies' / 'Animated')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'Movies')}, {'path': str(kids), 'kids': True}])
+    ts = next(i for i in lb.items(0) if i['title'] == 'Toy Shelf')
+    assert ts['kids'] and not ts.get('copies')
+    assert [m['title'] for m in lb.tv_view(kids=True)['movies']] == ['Toy Shelf']
+
+
+def test_a_collection_keeps_films_while_a_subfolder_cant_be_read(tmp_path, monkeypatch):
+    make(str(tmp_path / 'm' / 'Locked'), 'Alien 1979.mkv')
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'm')}])
+    ids = [i['id'] for i in lb.items(0)]
+    cid = lb.make_collection('Faves', ids, order='custom')
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith('Locked'):
+            raise PermissionError('denied')
+        return real(p)
+    monkeypatch.setattr(library.os, 'scandir', scandir)
+    lb2 = library.Library(lb.dir)
+    lb2.scan()                                     # first scan: Locked can't be read, Alien isn't known
+    shown = [m['id'] for m in lb2.collection_members(cid)]
+    lb2.update_collection(cid, members=shown, shown=shown)   # an edit while it's unreadable
+    assert lb2.data['collections'][cid]['members'] == ids
+
+
+def test_a_shared_target_is_fingerprinted_once(tmp_path, monkeypatch):
+    films = tmp_path / 'E'
+    make(str(films), 'Heat 1995.mkv')
+    a, b = tmp_path / 'A', tmp_path / 'B'
+    a.mkdir()
+    b.mkdir()
+    _junction(a / 'x', films)
+    _junction(b / 'y', films)
+    calls = []
+    real_fp = library.fingerprint
+    monkeypatch.setattr(library, 'fingerprint', lambda p, n: calls.append(p) or real_fp(p, n))
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(a)}, {'path': str(b)}])
+    assert [i['title'] for i in lb.items(0)] == ['Heat'] and len(calls) == 1
+
+
+def test_autostart_offered_for_a_broken_store(tmp_path):
+    (tmp_path / 'library.json').write_text('{not json', encoding='utf-8')
+    assert library.Library(str(tmp_path)).data['autostart_offered'] is True

@@ -1007,9 +1007,9 @@ def offer_autostart(lib, installed):
         return False
     try:
         set_autostart(True)
-    except OSError:
+        lib.set_value('autostart_offered', True)
+    except OSError:                    # registry or settings file not writable now: try again next start
         return False
-    lib.set_value('autostart_offered', True)
     return True
 
 
