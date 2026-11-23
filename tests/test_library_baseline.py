@@ -1392,7 +1392,9 @@ def test_a_film_on_two_unplugged_folders_stays_with_the_first(tmp_path):
     os.rename(str(usb1), str(tmp_path / 'away1'))
     os.rename(str(usb2), str(tmp_path / 'away2'))
     lb.scan()
-    assert lb.unreachable == [str(usb1), str(usb2)]           # both kept (unplugged, not gone)
+    assert lb.unreachable == [str(usb1), str(usb2)]           # both unplugged, not gone
+    fp = alien['id']
+    assert {(fp, str(usb1 / 'Alien 1979.mkv')), (fp, str(usb2 / 'Alien 1979.mkv'))} <= lb._kept   # both kept
     alien = next(i for i in lb.current() if i['title'] == 'Alien')
     assert alien['path'] == str(usb1 / 'Alien 1979.mkv')      # the first folder in Settings, as when found
     assert alien['folder'] == str(usb1)
