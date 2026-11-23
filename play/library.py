@@ -558,24 +558,30 @@ class Library:
         # files the last scan read first, from every folder; then the ones kept from before. A file read now
         # beats a remembered one (on a drive that's unplugged, it wouldn't play), and only files read now are
         # counted as copies (one kept from before may be the very file read here under another name).
-        kept = self._kept
-        for walked in ((True, False) if kept else (True,)):
-            for f, root in folders:
-                for fp, path, ext, size, _real_w, real in self._raw.get(root, []):
-                    if kept and ((fp, path) not in kept) != walked:
-                        continue
-                    kids = f.get('kids') or (kids_into and (real in kids_into or real.startswith(kids_pre)))
-                    if kids and self._tag_kids_once(fp):
-                        self._save_after_scan = True
-                        if fp in found:
-                            found[fp]['kids'] = True
-                    if fp in found:
-                        if walked and real not in reals[fp]:     # the same file twice (a real copy): list it once
-                            reals[fp].add(real)
-                            found[fp]['copies'] = len(reals[fp])
-                        continue
-                    found[fp] = self._item(fp, path, f['path'], ext, size)
-                    reals[fp] = {real}
+        kept, later = self._kept, []
+
+        def add(f, entry, walked):
+            fp, path, ext, size, _real_w, real = entry
+            kids = f.get('kids') or (kids_into and (real in kids_into or real.startswith(kids_pre)))
+            if kids and self._tag_kids_once(fp):
+                self._save_after_scan = True
+                if fp in found:
+                    found[fp]['kids'] = True
+            if fp in found:
+                if walked and real not in reals[fp]:     # the same file twice (a real copy): list it once
+                    reals[fp].add(real)
+                    found[fp]['copies'] = len(reals[fp])
+                return
+            found[fp] = self._item(fp, path, f['path'], ext, size)
+            reals[fp] = {real}
+        for f, root in folders:
+            for e in self._raw.get(root, []):
+                if kept and (e[0], e[1]) in kept:
+                    later.append((f, e))            # kept from before: after every file read now
+                else:
+                    add(f, e, True)
+        for f, e in later:
+            add(f, e, False)
         items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
                                                       i.get('episode') or 0))
         _mark_problems(items)                  # before publishing: readers on other threads see finished items
@@ -1008,7 +1014,9 @@ def _walk(root, skip_roots, sc, root_real_w=None):
                     offline.append(path)
                     # Offline, realpath only gives the link's raw target (Z:\Movies, not the \\nas\share it
                     # resolved to online). The same raw target as when it was online: the same place as then (the
-                    # merge after the walks keeps that). A different one: the link was re-pointed, go by it.
+                    # merge after the walks keeps that). A different one: the link was re-pointed, go by it. A link
+                    # first read online without its raw target has nothing to compare: the remembered place is kept,
+                    # and a re-point made while offline then goes unseen until the drive is back.
                     old = sc.old_links.get(lkey)
                     repointed = raw_t is not None and old is not None and old[2] is not None and old[2] != raw_t
                     if real is not None and (old is None or repointed):
