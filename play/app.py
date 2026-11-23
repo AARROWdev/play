@@ -368,6 +368,11 @@ class Window(QMainWindow):
         self.heading.setObjectName('heading')
         head.addWidget(self.heading)
         head.addStretch()
+        nc = QPushButton('New collection…')            # always here: any group of films, named as you like
+        nc.setObjectName('chip')
+        nc.setToolTip('Select the films, then click to group them under one name on the TV (like "Comedy")')
+        nc.clicked.connect(self.new_collection)
+        head.addWidget(nc)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search titles (Ctrl+F)')
         self.search.setClearButtonEnabled(True)
@@ -844,6 +849,23 @@ class Window(QMainWindow):
         if self.suggestion:
             self.lib.dismiss(self.suggestion['key'])
             self.refresh()
+
+    def new_collection(self):
+        """A collection of the selected films, named by you. Shows on the TV as one entry."""
+        films = [i for i in self.sel if i['kind'] == 'movie']
+        if not films:
+            QMessageBox.information(self, 'New collection', 'Select the films for it first (Ctrl-click or '
+                                    'Shift-click to pick several), then click New collection.')
+            return
+        name, ok = QInputDialog.getText(self, 'New collection', f'Name on the TV for these {len(films)} films:'
+                                        if len(films) > 1 else 'Name on the TV:')
+        if not ok or not name.strip():
+            return
+        cid = self.lib.make_collection(name, [i['id'] for i in films])
+        self.refresh()
+        if cid:
+            run_dialog(CollectionDialog(self, self.lib, cid))
+            self._changed()
 
     def _make_suggested(self):
         s = self.suggestion

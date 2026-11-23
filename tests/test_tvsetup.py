@@ -1397,4 +1397,15 @@ def test_a_typed_unusable_password_keeps_a_good_stored_one(qapp, tmp_path, monke
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and d.tv['10.0.0.6'].get('msg') != 'x')
     QApplication.processEvents()
     assert 'plain letters' in d.tv['10.0.0.6']['msg']                        # it was the unusable password
+    assert d.tv['10.0.0.6']['pw_problem'] is True
     assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:good'}   # a typed one never forgets it
+
+
+def test_each_tv_says_how_to_check_its_address_on_the_tv(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {
+        '10.0.0.5': {'info': {'name': 'Living Room', 'dev_mode': False}},
+        '10.0.0.6': {'info': {'name': 'Bedroom', 'dev_mode': True}, 'app': ('', '')}})
+    for ip in ('10.0.0.5', '10.0.0.6'):
+        select(d, ip)
+        text = d.detail.text()
+        assert 'Settings › Network › About' in text and f'<b>{ip}</b>' in text

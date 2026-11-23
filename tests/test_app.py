@@ -861,3 +861,28 @@ def test_set_up_tvs_is_one_dialog_and_opens_again(win, monkeypatch):
     assert shown[0].closing
     win.open_tv_setup()                             # opened again: the same dialog
     assert len(shown) == 2 and shown[1] is shown[0] and shown[0].closing
+
+
+def test_new_collection_is_always_there_and_uses_the_selection(win, monkeypatch):
+    shown = []
+    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: shown.append(d))
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: shown.append('told'))
+    win.sel = []
+    win.new_collection()                            # nothing selected: says how, makes nothing
+    assert shown == ['told'] and not win.lib.data['collections']
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:3]
+    episode = next(i for i in win.lib._items if i['kind'] == 'episode')
+    win.sel = films + [episode]
+    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Comedy', True))
+    win.new_collection()
+    (c,) = win.lib.data['collections'].values()
+    assert c['name'] == 'Comedy' and sorted(c['members']) == sorted(i['id'] for i in films)   # films only
+    assert any(isinstance(d, pa.CollectionDialog) for d in shown)
+    assert any(b.text() == 'New collection…' for b in win.findChildren(pa.QPushButton))   # it's on screen
+
+
+def test_new_collection_cancelled_makes_nothing(win, monkeypatch):
+    win.sel = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('', False))
+    win.new_collection()
+    assert not win.lib.data['collections']

@@ -294,7 +294,11 @@ class TvSetupDialog(QDialog):
             UNSURE: f'<b>PLAY may have reached {name}, but the TV didn\'t say how it went.</b> Look on the TV: '
                     'if PLAY opened, it\'s installed. If not, click <b>Install again</b>.',
         }
-        self.detail.setText(texts[s])
+        text = texts[s]
+        if s not in (CHECKING, OFFLINE):              # which TV is this? the TV itself says
+            text += ('<br><br><b>Is this the right TV?</b> On the TV you\'re setting up, open <b>Settings › Network '
+                     f'› About</b>: its IP address should be <b>{html.escape(ip)}</b>.')
+        self.detail.setText(text)
         labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall', UNSURE: 'Install again'}
         self.go.setText(labels.get(s, 'Install on this TV'))
         self.go.setEnabled(s in (READY, OTHER, INSTALLED, OLDER, BLOCKED, DONE, FAILED, UNSURE))
