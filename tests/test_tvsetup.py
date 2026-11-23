@@ -127,6 +127,8 @@ def tv():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield srv.server_address[1]
     srv.shutdown()
+    FakeInstaller.stale_once = FakeInstaller.stale_always = False
+    FakeInstaller.preflight_404 = FakeInstaller.refuse_bare = False
 
 
 def test_install_sends_the_app_with_the_developer_password(tv):
@@ -1000,8 +1002,8 @@ def test_a_retry_cut_off_before_its_upload_finished_isnt_unsure(tv, monkeypatch)
         if body and any(k.lower() == 'authorization' for k in headers):
             authorized.append(1)
             if len(authorized) == 2:                # ... and the retry is still being sent when time runs out
-                d = roku._current.deadline
-                while not d.expired:
+                d, give_up = roku._current.deadline, time.monotonic() + 10
+                while not d.expired and time.monotonic() < give_up:
                     time.sleep(0.02)
                 raise BrokenPipeError('the connection was closed mid-upload')
         return real(self, method, url, body, headers, **kw)
@@ -1025,3 +1027,72 @@ def test_a_call_inside_a_call_gives_its_connections_to_the_outer_one():
         seen['outer'] = list(roku._current.deadline.socks)
     roku.within(5, outer)
     assert seen['outer'] == [sock]
+
+
+
+# ------------------------------------------------------------------ af3bd7b review
+def test_a_challenge_that_cant_be_parsed_is_explained(tv, monkeypatch):
+    def broken(self, stale=False):
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Digest realm=, nonce="n"')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+    monkeypatch.setattr(FakeInstaller, '_challenge', broken)
+    with pytest.raises(roku.Unrecognised):
+        roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_a_stale_challenge_that_cant_be_answered_isnt_a_wrong_password(tv, monkeypatch):
+    real = FakeInstaller._challenge
+
+    def stale_without_realm(self, stale=False):
+        if not stale:
+            return real(self)
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Digest nonce="n2", qop="auth", stale=true')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+    monkeypatch.setattr(FakeInstaller, '_challenge', stale_without_realm)
+    FakeInstaller.stale_once = True
+    with pytest.raises(roku.Unrecognised):          # not WrongPassword: the stored password stays
+        roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_the_401_is_finished_with_before_the_password_goes(tv, monkeypatch):
+    closed = []
+    import http.client as hc
+    real_close = hc.HTTPResponse.close
+
+    def close(self):
+        closed.append(self.status)
+        return real_close(self)
+    monkeypatch.setattr(hc.HTTPResponse, 'close', close)
+    FakeInstaller.preflight_404 = True              # the upload itself gets the 401, then the retry goes
+    roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+    assert 401 in closed
+
+
+def test_a_late_watchdog_still_counts_a_connect_timeout(monkeypatch):
+    def connect(self):
+        time.sleep(self.timeout)
+        raise socket.timeout('timed out')
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', connect)
+    monkeypatch.setattr(roku._watchdog, 'watch', lambda d: None)             # the watchdog never gets to it
+    with pytest.raises(roku.TookTooLong):
+        roku.within(0.3, lambda: roku._Connection('127.0.0.1', 9, timeout=120).connect())
+
+
+def test_a_connection_made_after_the_cut_off_counts_as_cut():
+    class Sock:
+        closed = False
+
+        def shutdown(self, how):
+            pass
+
+        def detach(self):
+            Sock.closed = True
+            return -1
+    d = roku._Deadline(5)
+    d.expired = True
+    d.add(Sock())
+    assert d.cut and Sock.closed

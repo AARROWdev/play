@@ -403,11 +403,14 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
             if chal.get('stale', '').lower() != 'true' or getattr(req, '_play_stale_retry', False):
                 raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)   # refused
             req._play_stale_retry = True
-        elif not chal:                                          # asked, but not as a Roku asks (NTLM, Basic, blank)
-            raise Unrecognised(UNRECOGNISED)
         value = self.get_authorization(req, chal)
-        if not value:
-            return None
+        if not value:                                           # a challenge it can't answer (NTLM, Basic, blank,
+            raise Unrecognised(UNRECOGNISED)                    # no realm): not how a Roku asks, nor a refusal
+        try:                                                    # this answer is done with: free its connection
+            fp.read(65536)
+            fp.close()
+        except (OSError, http.client.HTTPException):
+            pass
         req.add_unredirected_header(self.auth_header, f'Digest {value}')
         return self.parent.open(req, timeout=req.timeout)       # (its own errors are its own)
 
@@ -425,7 +428,7 @@ def _challenge(value):
         return {}
     try:
         return urllib.request.parse_keqv_list(filter(None, urllib.request.parse_http_list(value[7:])))
-    except ValueError:
+    except (ValueError, IndexError):
         return {}
 
 
