@@ -831,3 +831,12 @@ def test_a_failed_run_key_write_offers_autostart_again(tmp_path, monkeypatch):
     lb = library.Library(str(tmp_path))
     assert pa.offer_autostart(lb, installed=True) is False
     assert library.Library(lb.dir).data['autostart_offered'] is False         # offered again next start
+
+
+def test_missing_folders_are_named_in_the_status(win):
+    win.lib.missing = [r'D:\Media\Kids']
+    win._status()
+    assert r'Not found: D:\Media\Kids. Update it in Settings' in win.status.toolTip()
+    win.lib.missing = [r'D:\Media\Kids', r'D:\Media\Films']
+    win._status()
+    assert 'Update them in Settings' in win.status.toolTip()

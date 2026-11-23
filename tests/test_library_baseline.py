@@ -1135,20 +1135,55 @@ def test_links_under_a_renamed_folder_are_forgotten(tmp_path):
     lb = library.Library(str(tmp_path / 'store'))
     lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids'), 'kids': True}])
     lb.items(0)
-    assert any('kids' in k for k in lb._links)
+    assert any(k.endswith(os.path.join('kids', 'link')) for k in lb._links)
     os.rename(str(media / 'Kids'), str(media / 'Children'))
     lb.scan()
     assert not any(k.endswith(os.path.join('kids', 'link')) for k in lb._links)
 
 
-def test_the_pool_is_built_again_when_folders_or_links_change(tmp_path):
-    lb, root = _offline_link_setup(tmp_path)
-    first = lb._pool_cache[1]
-    lb.set_folders([{'path': str(root)}, {'path': str(tmp_path / 'store')}])     # the folders change
+def test_the_pool_is_built_again_when_one_input_changes(tmp_path):
+    other = tmp_path / 'OtherDrive'
+    make(str(other), 'Alien 1979.mkv')
+    media, a, b, e = tmp_path / 'Media', tmp_path / 'A', tmp_path / 'B', tmp_path / 'E'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    for d in (a, b, e):
+        d.mkdir()
+    _junction(media / 'More', other)
+    _junction(tmp_path / 'R', a)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(tmp_path / 'R')}])
+    lb.items(0)
+    os.rename(str(other), str(tmp_path / 'gone'))
     lb.scan()
-    second = lb._pool_cache[1]
-    assert second is not first
-    _junction(root / 'More2', tmp_path / 'store')                               # a new link
     lb.scan()
+    steady = lb._pool_cache[1]
     lb.scan()
-    assert lb._pool_cache[1] is not second
+    assert lb._pool_cache[1] is steady                          # nothing changed: reused
+    _junction(media / 'Extra', e)                               # a new (empty) link: only the links change
+    lb.scan()
+    after_link = lb._pool_cache[1]
+    assert after_link is not steady
+    lb.scan()
+    assert lb._pool_cache[1] is after_link
+    os.rmdir(str(tmp_path / 'R'))                               # the media folder R now leads elsewhere:
+    _junction(tmp_path / 'R', b)                                # only its real location changes
+    lb.scan()
+    assert lb._pool_cache[1] is not after_link
+
+
+def test_a_renamed_folder_with_a_sleeping_link_keeps_its_titles(tmp_path):
+    nas = tmp_path / 'NAS'
+    make(str(nas), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    (media / 'Kids').mkdir()
+    _junction(media / 'Kids' / 'Link', nas)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids')}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(nas), str(tmp_path / 'asleep'))              # the NAS sleeps
+    lb.scan()
+    os.rename(str(media / 'Kids'), str(media / 'Children'))    # and the folder is renamed in Explorer
+    assert titles_now(lb) == ['Alien', 'Heat']
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Children')}])   # Settings updated
+    assert titles_now(lb) == ['Alien', 'Heat']
