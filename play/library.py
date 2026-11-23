@@ -551,10 +551,29 @@ class Library:
                 if self.data['kids_pending']:
                     lost_now = set(all_lost)
 
+                    # where a link leads is a real path (\\nas\share\...); the media folders, what was lost and
+                    # what is settling use the folders' own spellings (Z:\...): a target is put in those first
+                    real_roots = []
+                    for r in set(roots):
+                        try:
+                            real_roots.append((os.path.normcase(os.path.realpath(r)).rstrip(os.sep), r))
+                        except (OSError, ValueError):
+                            pass
+
+                    def spelled(t):
+                        for rr, r in real_roots:
+                            if t == rr or t.startswith(rr + os.sep):
+                                return r + t[len(rr):]
+                        return t
+
+                    pending_targets = {p: [spelled(v[1]) for lk, v in links.items()
+                                           if v[1] and (lk == p or _under(lk, [p]))]
+                                       for p in self.data['kids_pending']}
+
                     def targets_of(p):
                         """Where the links at or under p lead (into another media folder: its files are listed
                         under that folder's paths)."""
-                        return [v[1] for lk, v in links.items() if v[1] and (lk == p or _under(lk, [p]))]
+                        return pending_targets.get(p, [])
 
                     def read_in_full(p):
                         """Read in full this scan: its media folder was reached (or is gone for good), nothing of
@@ -573,7 +592,9 @@ class Library:
                         pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
                         # a pending link into another media folder: its files are listed under that folder's
                         # paths, so they're found by where the link leads
-                        targets = [t for p in done for t in targets_of(p)]
+                        targets = [t for p in done for v in (targets_of(p),) for t in v]
+                        targets += [v[1] for lk, v in links.items() if v[1] and any(lk == p or _under(lk, [p])
+                                                                                    for p in done)]
                         tpre = tuple(t.rstrip(os.sep) + os.sep for t in targets)
                         tagged = False
                         for files in raw.values():
@@ -745,6 +766,7 @@ class Library:
             it['near_miss'] = None
             if 'title' not in ov:                # the TV title follows an edited show / season / episode
                 it['title'] = _ep_title(it['show'], it['season'], it['episode'], it['episode_last'])
+        it['typed_title'] = 'title' in ov          # (a title you typed, not one PLAY read)
         if 'title' in ov:
             it['untitled'] = False
         # only a movie is in a collection: one turned into an episode drops out of it (and can't be stuck there)
@@ -820,7 +842,7 @@ class Library:
         while every media folder could be read is gone for good."""
         shown = set(shown)
         return [m for m in self.data['collections'].get(cid, {}).get('members', [])
-                if m not in shown and (m in self._by_id or self._incomplete)]
+                if m not in shown and (self._by_id[m]['kind'] == 'movie' if m in self._by_id else self._incomplete)]
 
     def update_collection(self, cid, name=None, order=None, members=None, shown=None):
         """members, when given, is the new order of the films the dialog showed (shown: the ids it listed when it

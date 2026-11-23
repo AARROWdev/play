@@ -84,7 +84,7 @@ In PLAY's window on the PC you can:
 | **Set up TVs finds no TV** | The TV must be on and on the same network as the PC. Or add it by address: on the TV, **Settings › Network › About** shows its IP; click **Add by address…** |
 | **"Developer Mode is off"** | Do *Turn on Developer Mode* above on that TV, then click **Search again**. |
 | **"Needs a setting changed"** | On the TV: **Settings › System › Advanced system settings › Control by mobile apps**, set **Network access** to **Default**, then **Search again**. |
-| **"The TV didn't accept that password"** | Type the developer password you set on that TV (PLAY asks again). Forgot it? Do *Turn on Developer Mode* again to set a new one. |
+| **"Install didn't work"**, with *"The TV did not accept that developer password"* | Type the developer password you set on that TV (PLAY asks again). Forgot it? On the TV, press the remote sequence again: the screen now offers **Disable installer and restart**. Choose it; when the TV is back, press the sequence once more and choose **Enable installer and restart** with a new password. |
 | **The TV app can't find the PC** | Check Windows calls your network **Private** (Part 1, step 4), and that PLAY is running (its icon is in the tray). The TV app also lets you type the PC's address: PLAY's window shows it at the bottom. |
 | **A title says "Check" under Plays on Roku** | Roku can't play that file type (AVI, for example). Convert it to MP4 or MKV. |
 | **Another developer app was on the TV** | A Roku holds one developer app at a time: installing PLAY replaces it (Set up TVs asks first). |

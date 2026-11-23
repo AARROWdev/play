@@ -311,8 +311,8 @@ def title_line(i):
         ep = f"E{i.get('episode')}" + (f"-E{last}" if last and last != i.get('episode') else '')
         line = f"{i['show']} · {season} {ep}"
         t = i['title'].strip()
-        # the episode's own name: a title typed in PLAY (not the automatic one it reads from the file name)
-        if t and t != (i.get('auto') or {}).get('title', t):
+        # the episode's own name: a title typed in PLAY (not the automatic one it makes from the numbers)
+        if t and i.get('typed_title'):
             line += f' · {t}'
         return line
     return f"{i['title']} ({i['year']})" if i.get('year') else i['title']
@@ -748,7 +748,6 @@ class Window(QMainWindow):
 
     def _tick(self):
         """Status every 1.5 s; a folder scan when the last one is older than scan_every()."""
-        import time
         if not self.lib._scanned or time.monotonic() - self.lib._scanned >= self.scan_every():
             self.scanner.kick()
         self._status()
@@ -767,8 +766,6 @@ class Window(QMainWindow):
         else:
             t = f'○  Not serving. {self.srv.error or ""}'
         notes = []
-        if self._note and time.monotonic() < self._note[1]:
-            notes.append(self._note[0])
         if self.srv.running and self.srv.discovery_error:
             notes.append(self.srv.discovery_error)
         refused = self.srv.refused_hosts() if self.srv.running else []
@@ -783,6 +780,8 @@ class Window(QMainWindow):
             notes.append('Settings are not being saved (see the warning at start)')
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
         text = f'{t}   ·   {files}' + ''.join(f'   ·   {n}' for n in notes)
+        if self._note and time.monotonic() < self._note[1]:
+            text = f'{self._note[0]}   ·   {text}'      # first: a long line is cut at its end, not here
         tip = text
         if len(every) > 2:                                         # every address, so none is ever out of reach
             tip += '   ·   All addresses: ' + ', '.join(f'{ip}:{self.srv.port}' for ip in every)
@@ -1008,7 +1007,15 @@ class Window(QMainWindow):
         if self._year_for and self.d_year.isModified() and not (one and one['id'] == self._year_for):
             fid, self._year_for = self._year_for, None        # typed for a film that's no longer the one shown
             self.d_year.setModified(False)
-            self._save_year(fid)
+            self._save_year(fid, redraw=False)
+        if self._title_for and self.d_title.isModified() and not (one and one['id'] == self._title_for):
+            fid, self._title_for = self._title_for, None      # the same for a title typed without Enter
+            self.d_title.setModified(False)
+            t = self.d_title.text().strip()
+            old = self.lib.by_id(fid)
+            if t and old is not None and t != old['title']:
+                self.lib.set_item(fid, title=t)
+                QTimer.singleShot(0, self.refresh)
         self.d_year.setEnabled(bool(one) and one['kind'] == 'movie')
         if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
             self.d_year.setText(str(one.get('year') or '') if one and one['kind'] == 'movie' else '')
@@ -1058,11 +1065,12 @@ class Window(QMainWindow):
             self._save_year(self.sel[0]['id'])
         self.d_year.setModified(False)
 
-    def _save_year(self, fid):
-        """The Year box's text for the film fid: a year saves, empty clears it, anything else is put back."""
+    def _save_year(self, fid, redraw=True):
+        """The Year box's text for the film fid: a year saves, empty clears it, anything else is put back.
+        redraw False: called while the panel is being drawn (the redraw comes after)."""
         text = self.d_year.text().strip()
         film = self.lib.by_id(fid)
-        if film is None:
+        if film is None or film['kind'] != 'movie':
             return
         # ASCII digits only: '²' or '١' pass isdigit() and int() refuses or misreads them
         year = int(text) if text.isascii() and text.isdigit() else None
@@ -1072,7 +1080,10 @@ class Window(QMainWindow):
             self._status()
         elif year != film.get('year'):                         # (empty: no year)
             self.lib.set_item(fid, year=year)
-            self.refresh()
+            if redraw:
+                self.refresh()
+            else:
+                QTimer.singleShot(0, self.refresh)
 
     def _title_done(self):
         changed = False

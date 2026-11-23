@@ -20,7 +20,7 @@ _WEAK = re.compile(r'(?:\s+(?:hdr10?|dv|avc|aac\d*|ac3|dts\d*|ddp?\d*|atmos|prop
 # A year stands alone: start, a space, ( [ or a dash that doesn't follow a number before it; end, a space, ) ] or a
 # dash not followed by a digit after it. So '2049 2017' gives both, but a date (2019-07-04) or a span (1994-2004)
 # is not a year.
-_YEAR = re.compile(r'(?:^|(?<=[\s(\[])|(?<=(?<!\d)-))((?:19|20)\d\d)(?=[\s)\]]|-(?!\d)|$)')
+_YEAR = re.compile(r'(?:^|(?<=[\s(\[])|(?<=(?<!\d)-))((?:18[7-9]|19\d|20\d)\d)(?=[\s)\]]|-(?!\d)|$)')
 _EP_END = r'(?:-?E(?P<e2>\d{1,3})|-(?P<e3>\d{1,3}))?(?!\d)'   # S01E01-E02, S01E01E02, S01E01-02
 # Episode forms, tried in order. Each captures (show, season, episode) where present.
 _EP_FORMS = [
@@ -35,7 +35,7 @@ _EP_E = re.compile(r'^(?:E|Ep|Episode)[\s\-.]*(\d{1,3})(?!\d)', re.I)     # 'E02
 _EP_NUM = re.compile(r'^(\d{1,3})(?!\d)(?:\s|\-|$)')                       # '02 Pilot'
 _EP_MARK = r'S\d{1,2}\s*-?\s*E\d{1,3}(?:-?E?\d{1,3})?|\d{1,2}x\d{2,3}'
 # a bracketed year or episode marker is kept (unwrapped); any other [group] tag is dropped
-_KEEP_BRACKETS = re.compile(r'[\[(]\s*((?:19|20)\d\d|' + _EP_MARK + r')\s*[\])]', re.I)
+_KEEP_BRACKETS = re.compile(r'[\[(]\s*((?:18[7-9]|19\d|20\d)\d|' + _EP_MARK + r')\s*[\])]', re.I)
 
 
 def _light(stem):

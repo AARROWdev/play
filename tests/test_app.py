@@ -1319,8 +1319,7 @@ def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch)
     films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
     cid = win.lib.make_collection('Comedy', [films[0]['id'], films[1]['id']])
     win.lib.data['collections'][cid]['members'].append('ffffffffffffffff')   # a film on a drive that's away
-    monkeypatch.setattr(win.lib, '_incomplete', True)
-    win.lib._incomplete = True                      # (that drive isn't read this time: the film is kept)
+    monkeypatch.setattr(win.lib, '_incomplete', True)   # (that drive isn't read this time: the film is kept)
     d = pa.CollectionDialog(win, win.lib, cid)
     for _ in range(d.list.count()):
         d.list.item(0).setSelected(True)
@@ -1334,14 +1333,24 @@ def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch)
 
 def test_episode_lines_dont_repeat_the_file_name():
     base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'episode_last': None,
-            'auto': {'title': 'Ann Droid S01E01'}}
+            'typed_title': False}
     assert pa.title_line(dict(base, title='Ann Droid S01E01')) == 'Ann Droid · S1 E1'
-    assert pa.title_line(dict(base, title='The Pool')) == 'Ann Droid · S1 E1 · The Pool'
-    assert pa.title_line(dict(base, title='Ann Droid and the Pool')) == 'Ann Droid · S1 E1 · Ann Droid and the Pool'
-    two = dict(base, episode=3, episode_last=4, auto={'title': 'Ann Droid S01E03-E04'})
+    typed = dict(base, typed_title=True)
+    assert pa.title_line(dict(typed, title='The Pool')) == 'Ann Droid · S1 E1 · The Pool'
+    assert pa.title_line(dict(typed, title='Ann Droid and the Pool')) == 'Ann Droid · S1 E1 · Ann Droid and the Pool'
+    two = dict(base, episode=3, episode_last=4)
     assert pa.title_line(dict(two, title='Ann Droid S01E03-E04')) == 'Ann Droid · S1 E3-E4'
-    # a title stored from older numbers is still the automatic one if PLAY made it: shown only when typed
-    assert pa.title_line(dict(base, title='Ann Droid S01E01', auto={'title': 'Ann Droid S01E02'})) ==         'Ann Droid · S1 E1 · Ann Droid S01E01'
+
+
+def test_a_renumbered_episode_doesnt_show_its_title_twice(win, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    win.lib.set_folders(win.lib.folders + [{'path': str(tmp_path / 'm')}])
+    win.lib.scan()
+    ep = next(i for i in win.lib.current() if i.get('show') == 'Ann Droid')
+    win.lib.set_item(ep['id'], episode=3)           # renumbered: the title follows the numbers, not typed
+    assert pa.title_line(win.lib.by_id(ep['id'])) == 'Ann Droid · S1 E3'
+    win.lib.set_item(ep['id'], title='The Pool')
+    assert pa.title_line(win.lib.by_id(ep['id'])) == 'Ann Droid · S1 E3 · The Pool'
 
 
 def test_a_real_double_episode_shows_both_numbers(win, tmp_path):
@@ -1449,3 +1458,43 @@ def test_add_to_kids_with_nothing_in_kids_and_all_hidden(win, monkeypatch):
     monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
     win.add_to_kids()
     assert told[-1].startswith('Everything in the library is hidden')
+
+
+# ------------------------------------------------------------------ 182310e review
+def test_a_collection_whose_films_became_episodes_cant_be_saved_empty(win, monkeypatch):
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    cid = win.lib.make_collection('Comedy', [films[0]['id']])
+    win.lib.data['collections'][cid]['members'].append(films[1]['id'])
+    # the second one is no film now (an episode, say): the window doesn't list it ...
+    monkeypatch.setitem(win.lib._by_id, films[1]['id'], dict(films[1], kind='episode'))
+    d = pa.CollectionDialog(win, win.lib, cid)
+    assert d.shown == [films[0]['id']]
+    d.list.item(0).setSelected(True)
+    d._remove()
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    d._save()
+    assert told and 'Add at least one film' in told[-1]  # ... so nothing is left to save
+    d.deleteLater()
+
+
+def test_a_title_typed_then_another_film_picked_is_saved(win):
+    from PySide6.QtTest import QTest
+    a, b = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    win.show()
+    win._reselect([a['id']])
+    win._sel_changed()
+    win.d_title.setFocus()
+    win.d_title.selectAll()
+    QTest.keyClicks(win.d_title, 'Renamed Film')
+    win._reselect([b['id']])
+    win._sel_changed()
+    assert win.lib.by_id(a['id'])['title'] == 'Renamed Film' and win.lib.by_id(b['id'])['title'] == b['title']
+    win.hide()
+
+
+def test_a_year_never_lands_on_an_episode(win):
+    ep = next(i for i in win.lib._items if i['kind'] == 'episode')
+    win.d_year.setText('1999')
+    win._save_year(ep['id'])
+    assert not win.lib.by_id(ep['id']).get('year')
