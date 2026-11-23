@@ -223,7 +223,7 @@ class Library:
         self._migrate_old_episode_titles()
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
-        self._raw = {}             # normcased root -> [(fp, path, ext, size, real)] from the last walk reaching it
+        self._raw = {}             # normcased root -> [(fp, path, ext, size, real as written, real normcased)]
         self._into = {}            # normcased root -> real folders of other media folders it reaches (links,
                                    # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
@@ -380,26 +380,26 @@ class Library:
                         k = os.path.normcase(e[1])
                         o = owner(k)
                         if o is None:                # its folder was removed: find it again by where it really is
-                            real = os.path.normcase(e[4])
+                            real = e[5]
                             for tpre, base, ow in anchors:
                                 if real.startswith(tpre):
                                     # the rest of the real path, with its names as written on disk
                                     tail = e[4][len(tpre):] if len(real) == len(e[4]) else real[len(tpre):]
-                                    e = (e[0], os.path.join(base, tail), e[2], e[3], e[4])
+                                    e = (e[0], os.path.join(base, tail), e[2], e[3], e[4], e[5])
                                     k, o = os.path.normcase(e[1]), ow
                                     break
                         if o is not None:
                             pool.setdefault(o, {}).setdefault(k, e)
                 self._pool_cache = (key, pool)
                 return pool
-            results, seen_links = {}, set()
+            results, old_links, links = {}, links, {}       # this scan's walks fill links afresh
             for f, root in zip(folders, roots):
                 # media folders inside this one, with where they really are (None: not known, it's offline)
                 others = {r: real_of.get(r) for r in roots
                           if r != root and r.startswith(root.rstrip(os.sep) + os.sep)}
                 files, ok, changed, errs, off, into[root] = _walk(
-                    f['path'], others, cache, pending, new_pending, first, real_roots, real_of.get(root), by_real, listings,
-                    links, seen_links, real_w_of.get(root))
+                    f['path'], others, cache, pending, new_pending, first, real_roots, real_w_of.get(root), by_real,
+                    listings, links)
                 dirty = dirty or changed
                 if ok:
                     lost = errs + [os.path.normcase(o) for o in off]
@@ -411,11 +411,16 @@ class Library:
                         since[p] = min(since.get(p, now_w), now_w)
                     errored += [p for p in lost if now_w - since[p] < ERROR_GRACE]
                     links_off += off
-            # forgotten: links no media folder holds now, and links a walk that read their folder didn't list
-            # (deleted). A link inside something this scan couldn't read is kept.
+            # media folders that weren't reached because they were deleted or renamed (not unplugged)
+            gone = {root for f, root in zip(folders, roots) if root not in reached and _gone(f['path'], reached)}
+            # links: the ones this scan saw online, plus remembered ones it couldn't look at (offline, or in a folder
+            # that wasn't read or was asleep). A link a walk didn't list (deleted), or in no media folder or a gone
+            # one, is forgotten.
             all_lost = [x for _, lost in results.values() for x in lost]
-            links = {lk: v for lk, v in links.items() if owner(lk) is not None
-                     and (lk in seen_links or owner(lk) not in reached or _under(lk, all_lost))}
+            for lk, v in old_links.items():
+                ow = owner(lk)
+                if lk not in links and ow is not None and ow not in gone and (ow not in reached or _under(lk, all_lost)):
+                    links[lk] = v
             for root, (files, lost) in results.items():
                 # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
                 raw[root] = files
@@ -424,13 +429,12 @@ class Library:
                     lset, lpre = set(lost), tuple(x.rstrip(os.sep) + os.sep for x in lost)
                     raw[root] = files + [e for k, e in get_pool().get(root, {}).items()
                                          if k not in have and (k in lset or k.startswith(lpre))]
-            unreachable, missing, gone = [], [], set()
+            unreachable, missing = [], []
             for f, root in zip(folders, roots):
                 if root not in reached:
-                    if _gone(f['path'], reached):    # its folder above was read and it isn't there: deleted, renamed
+                    if root in gone:                 # its folder above was read and it isn't there: deleted, renamed
                         raw[root] = []
                         missing.append(f['path'])
-                        gone.add(root)
                         continue
                     raw[root] = list(get_pool().get(root, {}).values())   # NAS asleep, drive not mounted yet
                     unreachable.append(f['path'])
@@ -546,8 +550,7 @@ class Library:
             for f, root in folders:
                 if (root in self._live_roots) != live:
                     continue
-                for fp, path, ext, size, real in self._raw.get(root, []):
-                    real = os.path.normcase(real)
+                for fp, path, ext, size, _real_w, real in self._raw.get(root, []):
                     kids = f.get('kids') or (kids_into and (real in kids_into or real.startswith(kids_pre)))
                     if kids and self._tag_kids_once(fp):
                         self._save_after_scan = True
@@ -902,9 +905,9 @@ def _dir_link(entry):
         return False
 
 
-def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=frozenset(), root_real=None,
-          by_real=None, listings=None, links=None, seen_links=None, root_real_as_written=None):
-    """One media folder. Returns ([(fp, path, ext, size, real location as written)], could the folder be listed, did the cache change,
+def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=frozenset(), root_real_w=None,
+          by_real=None, listings=None, links=None):
+    """One media folder. Returns ([(fp, path, ext, size, real location as written, normcased)], could the folder be listed, did the cache change,
     [normcased folders that couldn't be listed], [links whose target is offline], [real folders of other media
     folders that a link or subfolder here leads into]). by_real and listings (shared by the walks of one scan) let a
     folder or file reached through two media folders be listed and fingerprinted once. A file that can't be read
@@ -925,21 +928,19 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
     by_real = {} if by_real is None else by_real
     listings = {} if listings is None else listings
     links = {} if links is None else links          # filled in: every link seen online -> where it leads
-    seen_links = set() if seen_links is None else seen_links   # filled in: every link listed, online or not
     try:
         st = os.stat(root)
         if not statmod.S_ISDIR(st.st_mode):
             return [], False, False, [], [], []
-        if not root_real or not root_real_as_written:
-            root_real_as_written = os.path.realpath(root)
-            root_real = os.path.normcase(root_real_as_written)
+        root_real_w = root_real_w or os.path.realpath(root)       # as written on disk
+        root_real = os.path.normcase(root_real_w)
     except OSError:
         return [], False, False, [], [], []
     other_roots = {r for r in real_roots if r != root_real}
     visited = {root_real}                         # real folders this walk has been through (links only add)
     now_mono, now = time.monotonic(), time.time()
     # (folder as named under the media folder, its real location normcased, and as written on disk)
-    stack = [(root, root_real, root_real_as_written)]
+    stack = [(root, root_real, root_real_w)]
     while stack:
         d, d_real, d_real_w = stack.pop()
         try:
@@ -965,7 +966,6 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
                     if own:
                         into_roots.append(own)
                     continue
-                seen_links.add(os.path.normcase(path))
                 try:
                     real_w = os.path.realpath(path)
                     real = os.path.normcase(real_w)
@@ -1015,14 +1015,14 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             real_w = os.path.join(d_real_w, e.name)                            # kept, as written on disk
             c = cache.get(key)
             if c and c[0] == fst.st_size and c[1] == fst.st_mtime_ns:
-                out.append((c[2], path, ext, fst.st_size, real_w))
+                out.append((c[2], path, ext, fst.st_size, real_w, real_file))
                 by_real.setdefault(real_file, (fst.st_size, fst.st_mtime_ns, c[2]))
                 continue
             known = by_real.get(real_file)
             if known and known[:2] == (fst.st_size, fst.st_mtime_ns):    # the same file, read by another walk
                 cache[key] = [fst.st_size, fst.st_mtime_ns, known[2]]
                 changed = True
-                out.append((known[2], path, ext, fst.st_size, real_w))
+                out.append((known[2], path, ext, fst.st_size, real_w, real_file))
                 continue
             seen = pending.get(key)
             same = seen is not None and seen[0] == fst.st_size and seen[1] == fst.st_mtime_ns
@@ -1041,7 +1041,7 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             cache[key] = [fst.st_size, fst.st_mtime_ns, fp]
             by_real[real_file] = (fst.st_size, fst.st_mtime_ns, fp)
             changed = True
-            out.append((fp, path, ext, fst.st_size, real_w))
+            out.append((fp, path, ext, fst.st_size, real_w, real_file))
         stack.extend(reversed(subdirs))
     return out, True, changed, errors, offline, into_roots
 

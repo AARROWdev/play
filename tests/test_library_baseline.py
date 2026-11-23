@@ -1060,18 +1060,17 @@ def test_a_deleted_kids_folder_stops_making_films_kids(tmp_path):
     lb = library.Library(str(tmp_path / 'store'))
     lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids' / 'Cartoons'), 'kids': True},
                     {'path': str(other)}])
-    lb.items(0)
+    assert next(i for i in lb.items(0) if i['title'] == 'Up')['kids']      # Kids flows through the link
     os.rmdir(str(media / 'Kids' / 'Cartoons' / 'Link'))
     shutil.rmtree(str(media / 'Kids'))
     lb.scan()
     make(str(other), 'Brazil 1985.mkv', b'brazil' * 50)
-    library.SETTLE = 0
     lb.scan()
     brazil = next(i for i in lb.current() if i['title'] == 'Brazil')
     assert not brazil['kids']
 
 
-def test_a_renamed_media_folder_is_reported(tmp_path, qapp_free=None):
+def test_a_renamed_media_folder_is_reported(tmp_path):
     media = tmp_path / 'Media'
     make(str(media / 'Kids'), 'Up 2009.mkv')
     lb = library.Library(str(tmp_path / 'store'))
@@ -1119,7 +1118,37 @@ def test_the_kept_titles_pool_is_reused_until_something_changes(tmp_path):
     lb.scan()
     assert lb._pool_cache[1] is first                      # nothing changed: the same pool
     make(str(root), 'Up 2009.mkv', b'up' * 50)
-    library.SETTLE = 0
     lb.scan()
     lb.scan()
     assert lb._pool_cache[1] is not first                  # a new title: built again
+
+
+
+# ------------------------------------------------------------------ 0ac5404 review
+def test_links_under_a_renamed_folder_are_forgotten(tmp_path):
+    other = tmp_path / 'Other'
+    make(str(other), 'Up 2009.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    (media / 'Kids').mkdir()
+    _junction(media / 'Kids' / 'Link', other)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids'), 'kids': True}])
+    lb.items(0)
+    assert any('kids' in k for k in lb._links)
+    os.rename(str(media / 'Kids'), str(media / 'Children'))
+    lb.scan()
+    assert not any(k.endswith(os.path.join('kids', 'link')) for k in lb._links)
+
+
+def test_the_pool_is_built_again_when_folders_or_links_change(tmp_path):
+    lb, root = _offline_link_setup(tmp_path)
+    first = lb._pool_cache[1]
+    lb.set_folders([{'path': str(root)}, {'path': str(tmp_path / 'store')}])     # the folders change
+    lb.scan()
+    second = lb._pool_cache[1]
+    assert second is not first
+    _junction(root / 'More2', tmp_path / 'store')                               # a new link
+    lb.scan()
+    lb.scan()
+    assert lb._pool_cache[1] is not second

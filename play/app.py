@@ -511,7 +511,8 @@ class Window(QMainWindow):
         if self.lib.unreachable:
             notes.append('Can\'t reach ' + ', '.join(self.lib.unreachable))
         if self.lib.missing:
-            notes.append('Not found: ' + ', '.join(self.lib.missing) + '. Update it in Settings')
+            notes.append('Not found: ' + ', '.join(self.lib.missing) +
+                         ('. Update it in Settings' if len(self.lib.missing) == 1 else '. Update them in Settings'))
         if self.lib.read_only:
             notes.append('Settings are not being saved (see the warning at start)')
         files = plural(len(self.lib._items), 'file') if self.lib._scanned else 'reading your folders…'
