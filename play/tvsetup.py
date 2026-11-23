@@ -285,8 +285,8 @@ class TvSetupDialog(QDialog):
             DONE: f'<b>Done.</b> PLAY is opening on {name}. It finds this PC by itself.',
             FAILED: f'<b>That didn\'t work:</b> {html.escape(t.get("msg") or "")}<br>Check the TV is on, '
                     'Developer Mode is on, and try again.',
-            UNSURE: f'<b>PLAY was sent to {name}, but the TV didn\'t say how it went.</b> Look on the TV: if PLAY '
-                    'opened, it\'s installed. If not, click <b>Install again</b>.',
+            UNSURE: f'<b>PLAY may have reached {name}, but the TV didn\'t say how it went.</b> Look on the TV: '
+                    'if PLAY opened, it\'s installed. If not, click <b>Install again</b>.',
         }
         self.detail.setText(texts[s])
         labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall', UNSURE: 'Install again'}

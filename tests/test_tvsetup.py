@@ -721,7 +721,7 @@ def test_connecting_counts_against_the_time(monkeypatch):
     monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: seen.append(self.timeout))
     monkeypatch.setattr(roku._Deadline, 'add', lambda self, sock: None)
     roku.within(0.5, lambda: roku._Connection('127.0.0.1', 9, timeout=120).connect())
-    assert seen and seen[0] <= 0.5
+    assert seen and seen[0] <= 0.6                  # the time left, plus a moment for the watchdog to call it
 
 
 def test_odd_password_challenges_are_explained(tv, monkeypatch):
@@ -811,7 +811,8 @@ def test_no_answer_after_the_app_went_is_unsure_and_keeps_no_password(qapp, tmp_
     select(d, '10.0.0.6')
     d.install_current()
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.UNSURE)
-    assert "didn't say how it went" in d.detail.text() and d.go.text() == 'Install again'
+    assert "didn't say how it went" in d.detail.text() and "may have reached" in d.detail.text()
+    assert d.go.text() == 'Install again' and d.go.isEnabled()
     assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.9': 'enc:old'}   # nothing stored, nothing pruned
 
 
@@ -848,11 +849,30 @@ def test_a_call_that_finishes_in_time_leaves_nothing_behind():
     assert roku._watchdog.pending == []
 
 
-def test_the_watchdog_stays_up_after_a_cut_off():
-    with pytest.raises(roku.TookTooLong):
-        roku.within(0.1, lambda: (time.sleep(0.3), (_ for _ in ()).throw(socket.timeout('timed out'))))
+def test_the_watchdog_stays_up_after_a_cut_off(monkeypatch):
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), SlowEcp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(roku, 'DEADLINE', 0.3)
+        with pytest.raises(roku.TookTooLong):
+            roku._get(f'http://127.0.0.1:{srv.server_address[1]}/query/device-info')
+    finally:
+        srv.shutdown()
     time.sleep(0.2)
     assert roku._watchdog.thread is not None and roku._watchdog.thread.is_alive()
+
+
+def test_the_watchdog_rests_when_idle_and_wakes_again():
+    dog = roku._Watchdog(idle=0.2)
+    d = roku._Deadline(5)
+    dog.watch(d)
+    dog.finished(d)
+    time.sleep(0.6)
+    assert dog.thread is None                                                # idle: gone
+    late = roku._Deadline(0.1)
+    dog.watch(late)                                                          # needed again: back
+    time.sleep(0.4)
+    assert late.expired
 
 
 def test_a_connect_that_times_out_at_the_end_is_too_long(monkeypatch):
@@ -874,6 +894,55 @@ def test_a_call_inside_a_call_is_capped_by_the_outer_one():
 
 
 def test_plays_own_mistakes_arent_called_an_odd_challenge(tv, monkeypatch):
-    monkeypatch.setattr(roku, '_multipart', lambda *a: (_ for _ in ()).throw(TypeError('a bug in PLAY')))
+    real = roku._Connection.request
+
+    def broken(self, method, url, body=None, headers={}, **kw):
+        if body and 'Authorization' in headers:     # the upload that carries the password (or its retry)
+            raise TypeError('a bug in PLAY')
+        return real(self, method, url, body, headers, **kw)
+    monkeypatch.setattr(roku._Connection, 'request', broken)
     with pytest.raises(TypeError):
         roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_challenges_without_a_realm_or_with_auth_int_are_explained(tv, monkeypatch):
+    for header in ('Digest nonce="n", qop="auth"', 'Digest realm="rokudev", nonce="n", qop="auth-int"'):
+        def challenge(self, stale=False, header=header):
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', header)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+        monkeypatch.setattr(FakeInstaller, '_challenge', challenge)
+        with pytest.raises(roku.Unrecognised, match='recognise'):
+            roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_a_bare_upload_doesnt_count_as_sent(monkeypatch):
+    class BareSlow(SlowAuthInstaller):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get('Content-Length') or 0))
+            time.sleep(3)                           # no challenge: the upload without a password just hangs
+    SlowAuthInstaller.preflight_404 = True
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), BareSlow)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(roku.TookTooLong) as e:
+            roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=0.8, port=srv.server_address[1])
+        assert not e.value.uploaded                 # so the wizard says it failed, not "may have reached"
+    finally:
+        srv.shutdown()
+
+
+def test_a_call_inside_a_call_reports_what_it_sent():
+    outer_seen = {}
+
+    def outer():
+        inner = {}
+
+        def send():
+            roku._current.deadline.sent(True)
+            inner['d'] = roku._current.deadline
+        roku.within(5, send)
+        outer_seen['uploaded'] = roku._current.deadline.uploaded
+    roku.within(5, outer)
+    assert outer_seen['uploaded'] is True
