@@ -918,9 +918,7 @@ def test_more_folders_and_which_is_default(win, tmp_path, monkeypatch):
     d._make_default()
     assert d._paths()[0] == str(extra) and 'default' in d.folders.item(0).text()
     fs = d.values()[0]
-    assert fs[0] == {'path': str(extra), 'kids': False}                       # a new folder is never a Kids one
-    kids_before = {f['path']: f['kids'] for f in win.lib.folders}
-    assert all(f['kids'] == kids_before[f['path']] for f in fs[1:])         # older ones keep what they were
+    assert all(f['kids'] is False for f in fs)                              # Settings never makes a Kids folder
 
 
 def test_add_media_moves_the_files_into_the_default_folder(win, tmp_path, monkeypatch):
@@ -1075,3 +1073,71 @@ def test_a_renamed_default_folder_isnt_made_again(win, monkeypatch, tmp_path):
 def test_the_videos_folder_comes_from_windows():
     assert os.path.basename(library.default_folder_path()) == 'PLAY'
     assert os.path.isabs(library.videos_folder())
+
+
+
+# ------------------------------------------------------------------ 1104925 review
+def test_the_progress_window_ignores_its_close_box_mid_move(qapp):
+    from PySide6.QtGui import QCloseEvent
+    dlg = pa._Progress('Adding media', None, 0, 2)
+    e = QCloseEvent()
+    dlg.closeEvent(e)
+    assert not e.isAccepted()
+    dlg.job_done = True
+    e = QCloseEvent()
+    dlg.closeEvent(e)
+    assert e.isAccepted()
+    dlg.deleteLater()
+
+
+def test_nothing_starts_while_the_file_picker_is_open(win, monkeypatch):
+    seen = []
+
+    def picker(*a, **k):
+        seen.append(win.moving)                     # busy from the picker on
+        return ([], '')
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', picker)
+    win.add_media()
+    assert seen == [True] and win.moving is False
+
+
+def test_closing_without_a_tray_waits_for_a_move(win, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: None)
+    win.tray = None
+    win.moving = True
+    e = QCloseEvent()
+    win.closeEvent(e)
+    assert not e.isAccepted()
+    win.moving = False
+
+
+def test_a_kids_mark_that_couldnt_be_set_is_said(win, tmp_path, monkeypatch):
+    src = tmp_path / 'x' / 'Up 2009.mkv'
+    make(str(src.parent), src.name)
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(src)], ''))
+
+    def yes_with_kids(box):
+        box.checkBox().setChecked(True)
+        return pa.QMessageBox.Yes
+    monkeypatch.setattr(pa.QMessageBox, 'exec', yes_with_kids)
+    monkeypatch.setattr(pa.media.library, 'fingerprint', lambda *a: (_ for _ in ()).throw(PermissionError('av')))
+    warned = []
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: warned.append(a[2]))
+    win.add_media()
+    assert warned and 'could not be marked Kids' in warned[0]
+
+
+def test_settings_never_writes_a_kids_folder_back(win, tmp_path):
+    kids = tmp_path / 'OldKids'
+    kids.mkdir()
+    win.lib.set_folders(win.lib.folders + [{'path': str(kids), 'kids': True}])
+    d = pa.SettingsDialog(win, win.lib)
+    assert all(f['kids'] is False for f in d.values()[0])
+    d.deleteLater()
+
+
+def test_the_videos_folder_falls_back_to_the_profile(monkeypatch):
+    import ctypes
+    monkeypatch.setattr(ctypes, 'windll', None, raising=False)          # Windows won't say
+    assert library.videos_folder() == os.path.join(os.path.expanduser('~'), 'Videos')

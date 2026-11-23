@@ -51,10 +51,12 @@ def videos_folder():
         u = _uuid.UUID('18989B1D-99B5-455B-841C-AB7C74E4DDFC')            # FOLDERID_Videos
         g = GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
         out = ctypes.c_wchar_p()
-        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
-            try:
+        try:
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0 \
+                    and out.value:
                 return out.value
-            finally:
+        finally:
+            if out:                                # freed whatever the answer (Windows may fill it either way)
                 ctypes.windll.ole32.CoTaskMemFree(out)
     except (OSError, AttributeError):
         pass
@@ -329,7 +331,9 @@ class Library:
                 p = os.path.abspath(f['path'])
                 if os.path.normcase(p) not in seen:
                     seen.add(os.path.normcase(p))
-                    out.append({'path': p, 'kids': f.get('kids') is True})
+                    # an older Kids folder that hasn't handed out its tags yet stays one until it has
+                    legacy = os.path.normcase(p) in self._legacy_kids
+                    out.append({'path': p, 'kids': f.get('kids') is True or legacy})
             changed = out != self.data['folders']
             self.data['folders'] = out
             if changed:
@@ -529,7 +533,8 @@ class Library:
                 # Kids unless it's marked
                 for f in self.data['folders']:
                     root = os.path.normcase(os.path.abspath(f['path']))
-                    if f.get('kids') and root in reached and root in self._legacy_kids:
+                    if f.get('kids') and root in reached and root in self._legacy_kids and \
+                            not any(_under(x, [root]) for x in all_lost):   # read in full: every file tagged
                         self._legacy_kids.discard(root)   # (its files were tagged by a rebuild already:
                         f['kids'] = False                   # the first scan always rebuilds)
                         self._save_after_scan = True

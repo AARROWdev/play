@@ -52,7 +52,7 @@ def test_a_copy_that_fails_leaves_nothing_behind(tmp_path, monkeypatch):
     monkeypatch.setattr(media.shutil, 'copy2', half_copy)
     moved, failed = media.move_files([str(tmp_path / 'src' / 'Up 2009.mkv')], str(tmp_path / 'dst'))
     assert moved == [] and 'space' in failed[0][1]
-    assert os.listdir(tmp_path / 'dst') == [] and os.path.exists(tmp_path / 'src' / 'Up 2009.mkv')
+    assert not (tmp_path / 'dst').exists() and os.path.exists(tmp_path / 'src' / 'Up 2009.mkv')   # no leftovers
 
 
 def test_an_original_that_cant_be_removed_leaves_no_second_copy(tmp_path, monkeypatch):
@@ -67,7 +67,7 @@ def test_an_original_that_cant_be_removed_leaves_no_second_copy(tmp_path, monkey
         return real_remove(p)
     monkeypatch.setattr(media.os, 'remove', remove)
     moved, failed = media.move_files([str(src)], str(tmp_path / 'dst'))
-    assert moved == [] and failed and src.exists() and os.listdir(tmp_path / 'dst') == []
+    assert moved == [] and failed and src.exists() and not (tmp_path / 'dst').exists()
 
 
 def test_across_drives_it_copies_then_removes(tmp_path, monkeypatch):
@@ -118,3 +118,55 @@ def test_a_second_copy_keeps_its_title_on_the_tv(tmp_path):
     make(str(tmp_path / 'src'), 'Up.mkv', b'two')
     moved, failed = media.move_files([str(tmp_path / 'src' / 'Up.mkv')], str(tmp_path / 'dst'))
     assert os.path.basename(moved[0][0]) == 'Up [2].mkv' and names.movie('Up [2]')[0] == 'Up'
+
+
+
+# ------------------------------------------------------------------ 1104925 review
+def test_a_read_only_file_isnt_moved_and_leaves_nothing(tmp_path, monkeypatch):
+    import stat
+    src = tmp_path / 'disc' / 'Up 2009.mkv'
+    make(str(src.parent), src.name, b'u' * 1000)
+    os.chmod(src, stat.S_IREAD)
+    try:
+        _no_rename(monkeypatch)
+        moved, failed = media.move_files([str(src)], str(tmp_path / 'dst'))
+        assert moved == [] and 'read-only' in failed[0][1] and src.exists()
+        assert not (tmp_path / 'dst').exists()                               # nothing copied first
+    finally:
+        os.chmod(src, stat.S_IWRITE)
+
+
+def test_a_read_only_copy_is_still_cleaned_up(tmp_path, monkeypatch):
+    import stat
+    src = tmp_path / 'src' / 'Up 2009.mkv'
+    make(str(src.parent), src.name, b'u' * 1000)
+    _no_rename(monkeypatch)
+    real_copy = media.shutil.copy2
+
+    def copy_read_only(a, b):                       # copy2 carries the read-only bit over
+        real_copy(a, b)
+        os.chmod(b, stat.S_IREAD)
+    monkeypatch.setattr(media.shutil, 'copy2', copy_read_only)
+    real_remove = os.remove
+
+    def remove(p):
+        if os.path.normcase(str(p)) == os.path.normcase(str(src)):
+            raise PermissionError(13, 'in use')
+        return real_remove(p)
+    monkeypatch.setattr(media.os, 'remove', remove)
+    moved, failed = media.move_files([str(src)], str(tmp_path / 'dst'))
+    assert moved == [] and failed and src.exists() and not (tmp_path / 'dst').exists()
+
+
+def test_leftover_part_files_are_swept(tmp_path):
+    dst = tmp_path / 'dst'
+    make(str(dst), '.abc' + media.PART, b'half')
+    make(str(tmp_path / 'src'), 'Up 2009.mkv', b'u' * 100)
+    media.move_files([str(tmp_path / 'src' / 'Up 2009.mkv')], str(dst))
+    assert os.listdir(dst) == ['Up 2009.mkv']
+
+
+def test_a_show_named_like_a_device_gets_a_usable_folder(tmp_path):
+    make(str(tmp_path / 'src'), 'Con S01E01.mkv', b'c' * 100)
+    moved, failed = media.move_files([str(tmp_path / 'src' / 'Con S01E01.mkv')], str(tmp_path / 'PLAY'))
+    assert failed == [] and os.path.exists(tmp_path / 'PLAY' / 'Con_' / 'Season 1' / 'Con S01E01.mkv')

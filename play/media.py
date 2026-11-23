@@ -7,6 +7,7 @@ original stays where it was.
 """
 import os
 import shutil
+import stat
 import uuid
 
 from . import library, names
@@ -25,18 +26,27 @@ def free_name(folder, name):
     return os.path.join(folder, candidate)
 
 
-def _same_place(a, b):
+_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}
+
+
+def _identity(path):
+    """What identifies a folder however it is spelled (drive letter, UNC, junction): (device, file id), or its
+    normcased path where the file system has no file ids."""
     try:
-        return os.path.samefile(a, b)
+        st = os.stat(path)
+        if st.st_ino:
+            return (st.st_dev, st.st_ino)
     except OSError:
-        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+        pass
+    return os.path.normcase(os.path.abspath(path))
 
 
 def _inside(path, roots):
-    """Is path inside one of the media folders (however they are spelled: drive letter, UNC, junction)?"""
+    """Is path inside one of the media folders?"""
+    ids = {_identity(r) for r in roots}             # (each root looked at once)
     d = os.path.dirname(os.path.abspath(path))
     while True:
-        if any(_same_place(d, r) for r in roots):
+        if _identity(d) in ids or os.path.normcase(d) in ids:
             return True
         up = os.path.dirname(d)
         if up == d:
@@ -53,13 +63,67 @@ def destination(src, folder):
     if not info:
         return folder
     show = ''.join(c for c in info['show'] if c not in '<>:"/\\|?*').strip(' .') or 'Show'
+    if show.split('.')[0].upper() in _RESERVED:       # a name Windows won't give a folder (CON, AUX ...)
+        show += '_'
     season = 'Specials' if info['season'] == 0 else f'Season {info["season"]}'
     return os.path.join(folder, show, season)
 
 
+def _remove(path):
+    """Remove a file, read-only or not. True if it's gone."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return not os.path.lexists(path)
+
+
+def _made_dirs(dest_dir):
+    """The folders os.makedirs(dest_dir) would make (deepest last)."""
+    out, d = [], os.path.abspath(dest_dir)
+    while not os.path.isdir(d):
+        out.insert(0, d)
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return out
+
+
+def _sweep(dest_dir):
+    """Copies left half-made by a move that was stopped (PLAY closed mid-copy, say)."""
+    try:
+        for e in os.scandir(dest_dir):
+            if e.name.endswith(PART):
+                _remove(e.path)
+    except OSError:
+        pass
+
+
 def _move_one(src, dest_dir):
-    """Move src into dest_dir under a free name; returns the new path. Raises OSError, leaving nothing behind."""
+    """Move src into dest_dir under a free name; returns the new path. Raises OSError, leaving nothing behind
+    (no copy, no file of its own, no new empty folder)."""
+    if not os.access(src, os.W_OK):                 # read-only (a disc, a card, a share): it can't be moved away
+        raise PermissionError(13, 'read-only: it can be copied, not moved')
+    made = _made_dirs(dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
+    try:
+        return _move_into(src, dest_dir)
+    except OSError:
+        for d in reversed(made):                    # folders made for it, now empty again
+            try:
+                os.rmdir(d)
+            except OSError:
+                break
+        raise
+
+
+def _move_into(src, dest_dir):
+    _sweep(dest_dir)
     name = os.path.basename(src)
     try:                                         # same drive: a rename (it never overwrites on Windows)
         final = free_name(dest_dir, name)
@@ -78,19 +142,12 @@ def _move_one(src, dest_dir):
             except FileExistsError:
                 continue
     except OSError:
-        try:
-            os.remove(part)
-        except OSError:
-            pass
+        _remove(part)
         raise
-    try:
-        os.remove(src)                           # last: only once the copy is in place
-    except OSError:
-        try:
-            os.remove(final)                     # the original stays: don't leave two copies
-        except OSError:
-            pass
-        raise
+    if not _remove(src):                         # last: only once the copy is in place
+        if not _remove(final):                   # the original stays: don't leave two copies
+            raise OSError(f'could not move it, and the copy at {final} could not be removed')
+        raise PermissionError(13, 'the original could not be removed, so it was not moved')
     return final
 
 

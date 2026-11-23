@@ -1416,3 +1416,38 @@ def test_an_older_kids_folder_tags_once_then_is_ordinary(tmp_path):
     lb.scan()
     assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']   # a film added later isn't
     assert library.Library(str(store)).folders[0]['kids'] is False         # saved
+
+
+
+def test_an_older_kids_folder_waits_for_a_full_read(tmp_path, monkeypatch):
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    make(str(kids / 'Locked'), 'Cars 2006.mkv', b'cars' * 50)
+    store = tmp_path / 'store'
+    store.mkdir()
+    (store / 'library.json').write_text(json.dumps({'folders': [{'path': str(kids), 'kids': True}]}),
+                                        encoding='utf-8')
+    real = os.scandir
+    _locked_scandir(monkeypatch)
+    lb = library.Library(str(store))
+    lb.items(0)
+    assert lb.folders[0]['kids'] is True                                    # part of it couldn't be read: not yet
+    monkeypatch.setattr(library.os, 'scandir', real)                        # readable again
+    lb.scan()
+    assert lb.folders[0]['kids'] is False
+    assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']    # the file it couldn't read: tagged
+
+
+def test_settings_saved_before_the_first_scan_keep_an_older_kids_folder(tmp_path):
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    store = tmp_path / 'store'
+    store.mkdir()
+    (store / 'library.json').write_text(json.dumps({'folders': [{'path': str(kids), 'kids': True}]}),
+                                        encoding='utf-8')
+    lb = library.Library(str(store))
+    lb.set_folders([{'path': str(kids), 'kids': False}])                    # Settings, before any scan
+    assert next(i for i in lb.items(0) if i['title'] == 'Up')['kids']      # its files still get tagged once
+    make(str(kids), 'Heat 1995.mkv', b'heat' * 50)
+    lb.scan()
+    assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']

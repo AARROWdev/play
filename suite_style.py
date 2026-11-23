@@ -47,7 +47,8 @@ def stylesheet(t):
 
 def apply(app, t=BLUE):
     from PySide6.QtGui import QColor, QPalette     # here, so the colours above can be read without Qt
-    app.setStyle("Fusion")
+    if app.style().name().lower() != "fusion":   # once: replacing it frees the style every widget still uses
+        app.setStyle("Fusion")
     p = QPalette()
     for role, key in ((QPalette.Window, "mid"), (QPalette.Base, "base"), (QPalette.AlternateBase, "alt"),
                       (QPalette.Button, "mid"), (QPalette.ToolTipBase, "alt"), (QPalette.Highlight, "sel")):

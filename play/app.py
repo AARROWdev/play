@@ -213,7 +213,6 @@ class SettingsDialog(QDialog):
         v.addWidget(note)
         self.folders = QListWidget()
         self.folders.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.kids_was = {os.path.normcase(f['path']): f.get('kids') is True for f in lib.folders}
         paths = [f['path'] for f in lib.folders] or ([library.default_folder_path()] if first_run else [])
         for p in paths:
             self._add_row(p)
@@ -297,8 +296,7 @@ class SettingsDialog(QDialog):
             self._mark_default()
 
     def values(self):
-        # a folder that was a Kids folder (older settings) stays one; new folders aren't
-        fs = [{'path': p, 'kids': self.kids_was.get(os.path.normcase(p), False)} for p in self._paths()]
+        fs = [{'path': p, 'kids': False} for p in self._paths()]   # (an older Kids folder: the library keeps it)
         return fs, self.port.value(), self.skin.currentText(), self.auto.isChecked()
 
 
@@ -925,9 +923,12 @@ class Window(QMainWindow):
         elif cid is None:
             self.lib.remove_from_collections(ids)
         elif self._moves_ok(ids, into=cid):
-            c = self.lib.data['collections'][cid]
-            self.lib.update_collection(cid, members=c['members'] + [i for i in ids if i not in c['members']])
+            self._add_to_collection(cid, ids)
         self.refresh()
+
+    def _add_to_collection(self, cid, ids):
+        c = self.lib.data['collections'][cid]
+        self.lib.update_collection(cid, members=c['members'] + [i for i in ids if i not in c['members']])
 
     def _moves_ok(self, ids, into=None):
         """A film is in one collection at a time: putting these in a collection takes them out of the others.
@@ -963,8 +964,7 @@ class Window(QMainWindow):
                 return None
             if not self._moves_ok(ids, into=same):
                 return None
-            c = self.lib.data['collections'][same]
-            self.lib.update_collection(same, members=c['members'] + [i for i in ids if i not in c['members']])
+            self._add_to_collection(same, ids)
             return same
         if not self._moves_ok(ids):
             return None
@@ -979,6 +979,13 @@ class Window(QMainWindow):
         """Pick video files and move them into the default folder (optionally marked Kids)."""
         if self.busy():
             return
+        self.moving = True                             # from the file picker on: nothing else starts meanwhile
+        try:
+            self._add_media()
+        finally:
+            self.moving = False
+
+    def _add_media(self):
         folder = self.lib.default_folder
         if not folder:
             QMessageBox.information(self, 'Add media', 'First add a media folder in Settings.')
@@ -1006,26 +1013,28 @@ class Window(QMainWindow):
             QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
             return
         roots = [f['path'] for f in self.lib.folders]
-        self.moving = True                             # meanwhile Settings, Set up TVs, Add media and Quit wait
-        try:
-            moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.move_files(
-                paths, folder, roots, progress, fingerprints=kids), len(paths))
-        finally:
-            self.moving = False
+        moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.move_files(
+            paths, folder, roots, progress, fingerprints=kids), len(paths))
+        unmarked = []
         if kids:
             fps = [fp for _, fp in moved if fp]
+            unmarked = [p for p, fp in moved if not fp]
             if fps:
                 self.lib.mark_kids(fps)
         self.scanner.kick()
+        notes = []
         if failed:
-            QMessageBox.warning(self, 'Add media', 'These were not moved:\n' +
-                                '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
+            notes.append('These were not moved:\n' + '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
+        if unmarked:                                   # moved, but its Kids mark couldn't be set: say so
+            notes.append('These were moved but could not be marked Kids (mark them in the library):\n' +
+                         '\n'.join(os.path.basename(p) for p in unmarked))
+        if notes:
+            QMessageBox.warning(self, 'Add media', '\n\n'.join(notes))
 
     def busy(self):
         """Files are being moved: say so (True) rather than start something else meanwhile."""
         if getattr(self, 'moving', False):
-            QMessageBox.information(self, 'PLAY', 'PLAY is moving files into your media folder. Wait until it\'s '
-                                    'done.')
+            QMessageBox.information(self, 'PLAY', 'PLAY is adding media to your media folder. Finish that first.')
             return True
         return False
 
@@ -1124,9 +1133,10 @@ class Window(QMainWindow):
             except OSError as e:
                 QMessageBox.warning(self, 'PLAY', f'Could not create {folders[0]["path"]}: {e.strerror or e}')
         self.lib.set_folders(folders)
-        self.lib.set_value('skin', skin)
-        apply_skin(QApplication.instance(), skin)
-        self.set_icons()
+        if skin != skins.name(self.lib.data['skin']):  # restyle only for a new skin (it repolishes every widget)
+            self.lib.set_value('skin', skin)
+            apply_skin(QApplication.instance(), skin)
+            self.set_icons()
         try:   # only when the box was changed: another copy (portable, from source) mustn't remove this one's
             if auto != auto_was:
                 set_autostart(auto)
@@ -1185,6 +1195,8 @@ class Window(QMainWindow):
                 self._told = True
                 self.tray.showMessage('PLAY is still running', 'Your TVs can keep watching. Right-click the '
                                       'PLAY icon to quit.', self.icon(), 4000)
+        elif self.busy():              # no tray: closing quits PLAY, but not in the middle of adding media
+            e.ignore()
         else:                          # no tray to live in: closing the window quits PLAY
             e.accept()
             QApplication.instance().quit()
