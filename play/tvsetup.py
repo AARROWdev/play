@@ -172,8 +172,7 @@ class TvSetupDialog(QDialog):
         if self.closing:
             return
         for ip in ips:
-            t = self.tv.get(ip, {})
-            if t.get('status') != INSTALLING and not t.get('ask_again'):
+            if self.tv.get(ip, {}).get('status') != INSTALLING:
                 self._check(ip)
         self._details()
 
@@ -206,10 +205,13 @@ class TvSetupDialog(QDialog):
         self.bus.state.emit(ip, st)
 
     def _set(self, ip, st):
+        if self.tv.get(ip, {}).get('status') == INSTALLING and not st.get('install'):
+            return                                      # a check that started before the install: out of date
         wrong = st.get('wrong')
         if 'pw' in st or wrong:
             _after_install(self, ip, st)
             st = {k: v for k, v in st.items() if k not in ('pw', 'wrong')}
+        st = {k: v for k, v in st.items() if k != 'install'}
         cur = self.tv.setdefault(ip, {'status': CHECKING, 'info': None, 'app': None, 'msg': ''})
         cur.update(st)
         self._row(ip)
@@ -345,7 +347,7 @@ class TvSetupDialog(QDialog):
         self._run(self._install_worker, ip, pw)
 
     def _install_worker(self, ip, pw):
-        st = {}
+        st = {'install': True}
         try:
             st['msg'] = self.net.install(ip, pw, self.net.package())
             st['status'] = DONE

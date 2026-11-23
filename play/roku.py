@@ -9,6 +9,7 @@ Everything here is standard library only, so the installed PLAY needs nothing ex
 """
 import base64
 import ctypes
+import http.client
 import io
 import ipaddress
 import os
@@ -48,10 +49,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def opener(*handlers):
     """An opener that goes straight to the TV: no proxy (whatever the system or environment says) and no
     redirects."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), *handlers)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), _DeadlineHTTP(), *handlers)
 
-
-_DIRECT = opener()
 
 
 def app_dir():
@@ -173,25 +172,80 @@ def _read(r):
         chunks.append(chunk)
 
 
-def within(deadline, fn, *args):
-    """fn(*args), given `deadline` seconds in all: connecting, sending, the answer's headers and body. A request
-    that trickles along (a byte at a time stays under every per-step timeout) is given up on, so it can't hold a
-    worker, or the wizard waiting for it, for good; the abandoned call ends on its own socket timeouts."""
-    box = {}
+class _Deadline:
+    """The connections one call opens, shut down when its time is up: whatever the call is doing (sending the app,
+    waiting for headers, reading a reply that trickles in) fails at once, in the call's own thread. Nothing goes on
+    in the background afterwards."""
 
-    def run():
+    def __init__(self, seconds):
+        self.lock, self.socks, self.expired = threading.Lock(), [], False
+        self.timer = threading.Timer(seconds, self.expire)
+        self.timer.daemon, self.timer.name = True, 'play-deadline'
+
+    def add(self, sock):
+        with self.lock:
+            if self.expired:
+                _hard_close(sock)
+            else:
+                self.socks.append(sock)
+
+    def expire(self):
+        with self.lock:
+            self.expired = True
+            for s in self.socks:
+                _hard_close(s)
+
+
+def _hard_close(sock):
+    """Close a socket now, even while another thread waits on it. On Windows neither shutdown() nor close() wakes a
+    waiting read while the socket's reader (makefile) still holds it; closing the handle itself does. The socket
+    object lets go of the handle first, so it can't close it again later (by then it may be someone else's)."""
+    try:
+        fd = sock.detach()
+    except OSError:
+        return
+    if fd is not None and fd >= 0:
         try:
-            box['value'] = fn(*args)
-        except BaseException as e:            # handed back to the caller below
-            box['error'] = e
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    t.join(deadline)
-    if t.is_alive():
-        raise OSError('The TV took too long to answer')
-    if 'error' in box:
-        raise box['error']
-    return box['value']
+            socket.close(fd)
+        except OSError:
+            pass
+
+
+_current = threading.local()            # the deadline of the call running in this thread
+
+
+class _Connection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        deadline = getattr(_current, 'deadline', None)
+        if deadline is not None:
+            deadline.add(self.sock)
+
+
+class _DeadlineHTTP(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_Connection, req)
+
+
+_DIRECT = opener()
+
+
+def within(seconds, fn, *args):
+    """fn(*args), given `seconds` in all: connecting, sending, the answer's headers and body. A request that
+    trickles along (a byte at a time stays under every per-step timeout) is cut off by shutting its connections,
+    so it can't hold a worker, or the wizard waiting for it, and nothing of it carries on."""
+    deadline = _Deadline(seconds)
+    _current.deadline = deadline
+    deadline.timer.start()
+    try:
+        return fn(*args)
+    except Exception as e:
+        if deadline.expired:
+            raise OSError('The TV took too long to answer') from e
+        raise
+    finally:
+        deadline.timer.cancel()
+        _current.deadline = None
 
 
 def _get(url, timeout=4):
@@ -321,9 +375,13 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     try:
         text = within(timeout, send)
     except urllib.error.HTTPError as e:
+        if e.code == 401 and not req.unredirected_hdrs.get('Authorization'):   # never got as far as a password
+            raise OSError("The TV asked for its password in a way PLAY doesn't recognise") from e
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e
         raise OSError(f'The TV answered {e.code}') from e
+    except (KeyError, ValueError) as e:          # a password challenge urllib can't use (no nonce, say)
+        raise OSError("The TV asked for its password in a way PLAY doesn't recognise") from e
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
     msg = ' '.join(m.strip() for m in msgs if m.strip())
     low = msg.lower()
