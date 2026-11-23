@@ -1431,11 +1431,14 @@ def test_an_older_kids_folder_waits_for_a_full_read(tmp_path, monkeypatch):
     _locked_scandir(monkeypatch)
     lb = library.Library(str(store))
     lb.items(0)
-    assert lb.folders[0]['kids'] is True                                    # part of it couldn't be read: not yet
+    assert lb.folders[0]['kids'] is False                                   # retired after what it could read ...
+    assert lb.data['kids_pending']                                          # ... the rest is remembered
+    make(str(kids), 'Heat 1995.mkv', b'heat' * 50)                          # (a film added now isn't Kids)
     monkeypatch.setattr(library.os, 'scandir', real)                        # readable again
     lb.scan()
-    assert lb.folders[0]['kids'] is False
     assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']    # the file it couldn't read: tagged
+    assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']
+    assert lb.data['kids_pending'] == []
 
 
 def test_settings_saved_before_the_first_scan_keep_an_older_kids_folder(tmp_path):

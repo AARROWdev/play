@@ -246,6 +246,9 @@ class Library:
             'unreadable_since': {k: t for k, v in _dict(d.get('unreadable_since')).items()
                                  if isinstance(k, str) and (t := _finite(v)) is not None},
             # TV serial -> its developer password, encrypted for this Windows user (Set up TVs)
+            # parts of an older Kids folder still to be read (their files are tagged Kids once, when read)
+            'kids_pending': [p for p in d.get('kids_pending', []) if isinstance(p, str)]
+                            if isinstance(d.get('kids_pending'), list) else [],
             'tv_passwords': {k: v for k, v in _dict(d.get('tv_passwords')).items()      # serial@address only
                              if isinstance(k, str) and isinstance(v, str) and '@' in k},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
@@ -534,9 +537,32 @@ class Library:
                 for f in self.data['folders']:
                     root = os.path.normcase(os.path.abspath(f['path']))
                     if f.get('kids') and root in reached and root in self._legacy_kids and \
-                            not any(_under(x, [root]) for x in all_lost):   # read in full: every file tagged
-                        self._legacy_kids.discard(root)   # (its files were tagged by a rebuild already:
-                        f['kids'] = False                   # the first scan always rebuilds)
+                            not any(_under(k, [root]) for k in sc.new_pending):   # (files still settling: wait)
+                        # what this scan read of it was tagged by its rebuild (the first scan always rebuilds);
+                        # what it couldn't read (a locked folder, an offline link) is tagged once when it's read
+                        self._legacy_kids.discard(root)
+                        pend = [x for x in all_lost if _under(x, [root])]
+                        if pend:
+                            self.data['kids_pending'] = sorted(set(self.data['kids_pending']) | set(pend))
+                        f['kids'] = False
+                        self._save_after_scan = True
+                # parts of an older Kids folder that couldn't be read when it retired: their files are tagged
+                # once, when a scan reads them
+                if self.data['kids_pending']:
+                    lost_now = set(all_lost)
+                    done = [p for p in self.data['kids_pending']
+                            if not any(p == x or _under(p, [x]) or _under(x, [p]) for x in lost_now)]
+                    if done:
+                        pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
+                        tagged = False
+                        for files in raw.values():
+                            for e in files:
+                                k = os.path.normcase(e[1])
+                                if (k in done or k.startswith(pre)) and (e[0], e[1]) not in kept:
+                                    tagged = self._tag_kids_once(e[0]) or tagged
+                        if tagged:
+                            self._rebuild()
+                        self.data['kids_pending'] = [p for p in self.data['kids_pending'] if p not in done]
                         self._save_after_scan = True
                 self._gen += 1
                 self._scanned = time.monotonic()     # after the rebuild: readers never see "scanned" but empty

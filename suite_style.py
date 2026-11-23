@@ -45,10 +45,18 @@ def stylesheet(t):
     """
 
 
-def apply(app, t=BLUE):
+_fusion_for = None      # the application Fusion was set on
+
+
+def apply(app, t=BLUE, extra=""):
+    """Colours, palette and stylesheet (plus an app's own extra rules) for the whole application. Fusion is set
+    once per application: setting it again replaces the style object that the stylesheet style and every polished
+    widget still use (a crash). The style's name can't tell: with a stylesheet it reads ''. """
+    global _fusion_for
     from PySide6.QtGui import QColor, QPalette     # here, so the colours above can be read without Qt
-    if app.style().name().lower() != "fusion":   # once: replacing it frees the style every widget still uses
+    if _fusion_for is not app:
         app.setStyle("Fusion")
+        _fusion_for = app
     p = QPalette()
     for role, key in ((QPalette.Window, "mid"), (QPalette.Base, "base"), (QPalette.AlternateBase, "alt"),
                       (QPalette.Button, "mid"), (QPalette.ToolTipBase, "alt"), (QPalette.Highlight, "sel")):
@@ -58,4 +66,4 @@ def apply(app, t=BLUE):
     p.setColor(QPalette.HighlightedText, QColor("#ffffff"))
     p.setColor(QPalette.PlaceholderText, QColor(PLACEHOLDER))
     app.setPalette(p)
-    app.setStyleSheet(stylesheet(t))
+    app.setStyleSheet(stylesheet(t) + extra)       # once (each set repolishes every widget)

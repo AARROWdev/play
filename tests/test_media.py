@@ -159,14 +159,50 @@ def test_a_read_only_copy_is_still_cleaned_up(tmp_path, monkeypatch):
 
 
 def test_leftover_part_files_are_swept(tmp_path):
+    import time
     dst = tmp_path / 'dst'
-    make(str(dst), '.abc' + media.PART, b'half')
+    make(str(dst), '.old' + media.PART, b'half')
+    make(str(dst), '.now' + media.PART, b'another PLAY is copying this one')
+    old = time.time() - media.STALE_PART - 60
+    os.utime(dst / ('.old' + media.PART), (old, old))
     make(str(tmp_path / 'src'), 'Up 2009.mkv', b'u' * 100)
     media.move_files([str(tmp_path / 'src' / 'Up 2009.mkv')], str(dst))
-    assert os.listdir(dst) == ['Up 2009.mkv']
+    assert sorted(os.listdir(dst)) == ['.now' + media.PART, 'Up 2009.mkv']     # only the stale one goes
 
 
 def test_a_show_named_like_a_device_gets_a_usable_folder(tmp_path):
     make(str(tmp_path / 'src'), 'Con S01E01.mkv', b'c' * 100)
     moved, failed = media.move_files([str(tmp_path / 'src' / 'Con S01E01.mkv')], str(tmp_path / 'PLAY'))
     assert failed == [] and os.path.exists(tmp_path / 'PLAY' / 'Con_' / 'Season 1' / 'Con S01E01.mkv')
+
+
+
+# ------------------------------------------------------------------ 861140e review
+def test_an_original_still_listed_after_its_delete_counts_as_moved(tmp_path, monkeypatch):
+    src = tmp_path / 'card' / 'Up 2009.mkv'
+    make(str(src.parent), src.name, b'u' * 1000)
+    _no_rename(monkeypatch)
+    real_remove = os.remove
+
+    def delete_pending(p):                          # another program holds it: the delete is taken, the name stays
+        if os.path.normcase(str(p)) == os.path.normcase(str(src)):
+            return None
+        return real_remove(p)
+    monkeypatch.setattr(media.os, 'remove', delete_pending)
+    moved, failed = media.move_files([str(src)], str(tmp_path / 'dst'))
+    assert failed == [] and os.path.exists(tmp_path / 'dst' / 'Up 2009.mkv')    # the copy is kept
+
+
+def test_a_read_only_file_can_still_be_renamed_on_the_same_drive(tmp_path):
+    import stat
+    src = tmp_path / 'src' / 'Up 2009.mkv'
+    make(str(src.parent), src.name, b'u' * 100)
+    os.chmod(src, stat.S_IREAD)
+    moved, failed = media.move_files([str(src)], str(tmp_path / 'dst'))
+    assert failed == [] and os.path.exists(tmp_path / 'dst' / 'Up 2009.mkv')
+    os.chmod(tmp_path / 'dst' / 'Up 2009.mkv', stat.S_IWRITE)
+
+
+def test_a_missing_file_says_so(tmp_path):
+    moved, failed = media.move_files([str(tmp_path / 'gone.mkv')], str(tmp_path / 'dst'))
+    assert 'not there' in failed[0][1]

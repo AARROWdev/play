@@ -1217,8 +1217,7 @@ EXTRA_QSS = """
 
 def apply_skin(app, name):
     t = skins.get(name)
-    suite_style.apply(app, t)
-    app.setStyleSheet(app.styleSheet() + EXTRA_QSS.format(**t))
+    suite_style.apply(app, t, EXTRA_QSS.format(**t))
     return t
 
 

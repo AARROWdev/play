@@ -1141,3 +1141,29 @@ def test_the_videos_folder_falls_back_to_the_profile(monkeypatch):
     import ctypes
     monkeypatch.setattr(ctypes, 'windll', None, raising=False)          # Windows won't say
     assert library.videos_folder() == os.path.join(os.path.expanduser('~'), 'Videos')
+
+
+
+# ------------------------------------------------------------------ 861140e review
+def test_the_style_is_set_once_and_the_stylesheet_once_per_skin(qapp, monkeypatch):
+    import suite_style
+    calls = {'style': 0, 'sheet': 0}
+    real_style, real_sheet = QApplication.setStyle, QApplication.setStyleSheet
+
+    def set_style(self, *a):                        # (a static method, called on the app)
+        calls['style'] += 1
+        return real_style(*a)
+
+    def set_sheet(self, *a):
+        calls['sheet'] += 1
+        return real_sheet(self, *a)
+    QApplication.setStyle('Windows')                # start from another style, as a fresh app does
+    qapp.setStyleSheet('')
+    monkeypatch.setattr(QApplication, 'setStyle', set_style)
+    monkeypatch.setattr(QApplication, 'setStyleSheet', set_sheet)
+    monkeypatch.setattr(suite_style, '_fusion_for', None)
+    names = list(skins.SKINS)
+    pa.apply_skin(qapp, names[0])
+    pa.apply_skin(qapp, names[1])                   # a different skin
+    pa.apply_skin(qapp, names[0])
+    assert calls == {'style': 1, 'sheet': 3}        # Fusion once; one stylesheet per skin
