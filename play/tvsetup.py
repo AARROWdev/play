@@ -230,7 +230,7 @@ class TvSetupDialog(QDialog):
     def _retry(self, ip):
         if self.closing or self.tv.get(ip, {}).get('status') != FAILED:
             return
-        pw = self._password(ip, retry=True)
+        pw = self._password(ip, retry=True, why=self.tv[ip].get('msg') if self.tv[ip].get('pw_problem') else None)
         if pw is not None:
             self._start_install(ip, pw)
 
@@ -283,8 +283,10 @@ class TvSetupDialog(QDialog):
                    f'version {html.escape(roku.app_version())} on it.',
             INSTALLING: f'Installing PLAY on {name}… (about 10 seconds)',
             DONE: f'<b>Done.</b> PLAY is opening on {name}. It finds this PC by itself.',
-            FAILED: f'<b>That didn\'t work:</b> {html.escape(t.get("msg") or "")}<br>Check the TV is on, '
-                    'Developer Mode is on, and try again.',
+            FAILED: (f'<b>That password can\'t be used:</b> {html.escape(t.get("msg") or "")}<br>Type the '
+                     'developer password you set on the TV.') if t.get('pw_problem') else
+                    (f'<b>That didn\'t work:</b> {html.escape(t.get("msg") or "")}<br>Check the TV is on, '
+                     'Developer Mode is on, and try again.'),
             UNSURE: f'<b>PLAY may have reached {name}, but the TV didn\'t say how it went.</b> Look on the TV: '
                     'if PLAY opened, it\'s installed. If not, click <b>Install again</b>.',
         }
@@ -318,14 +320,14 @@ class TvSetupDialog(QDialog):
         serial = (self.tv[ip].get('info') or {}).get('serial')
         return f'{serial}@{ip}' if serial and serial != ip else None
 
-    def _password(self, ip, retry=False):
+    def _password(self, ip, retry=False, why=None):
         key = self._key(ip)
         stored = self.lib.data['tv_passwords'].get(key) if key else None
         if stored and not retry:
             pw = self.net.unprotect(stored)
             if pw:
                 return pw
-        prompt = ('That password didn\'t work. ' if retry else '') + \
+        prompt = ((why + ' ') if why else 'That password didn\'t work. ' if retry else '') + \
             'The developer password you set on this TV when you turned on Developer Mode:'
         pw, ok = QInputDialog.getText(self, 'Developer password', prompt, QLineEdit.Password)
         return pw if ok and pw else None
@@ -365,8 +367,11 @@ class TvSetupDialog(QDialog):
             # the app was sent, with the password, but no answer came: it may or may not be on the TV. Nothing
             # says the password worked, so it isn't kept.
             st['status'], st['msg'] = (UNSURE if e.uploaded else FAILED), str(e)
+        except roku.UnusablePassword as e:           # no TV was asked: say why, and ask again
+            st['status'], st['wrong'], st['pw_problem'] = FAILED, True, True
+            st['msg'] = str(e)
         except roku.WrongPassword as e:
-            st['status'], st['wrong'] = FAILED, True
+            st['status'], st['wrong'], st['pw_problem'] = FAILED, True, False
             st['msg'] = str(e) or 'The TV didn\'t accept that password.'
         except Exception as e:
             st['status'], st['msg'] = FAILED, str(e) or type(e).__name__

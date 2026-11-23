@@ -1176,7 +1176,7 @@ def test_a_refusal_leaves_nothing_open(tv):
 
 def test_a_password_with_accents_is_a_wrong_password(monkeypatch):
     monkeypatch.setattr(roku._Connection, 'connect', lambda self: (_ for _ in ()).throw(AssertionError('connected')))
-    with pytest.raises(roku.WrongPassword, match='plain letters'):
+    with pytest.raises(roku.UnusablePassword, match='plain letters'):
         roku.install('127.0.0.1', 'sécret', b'ZIP', port=9)
 
 
@@ -1214,16 +1214,61 @@ def test_no_connection_once_the_time_is_up_even_if_the_watchdog_is_late(monkeypa
 def test_the_wizard_shows_why_a_password_was_refused(qapp, tmp_path, monkeypatch):
     class Plain(FakeNet):
         def install(self, ip, pw, data):
-            raise roku.WrongPassword('A Roku developer password uses only plain letters, digits and symbols')
+            raise roku.UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
     monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
     lib = library.Library(str(tmp_path))
     d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Plain({'10.0.0.6': {
         'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
     wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
-    answers = iter([('sécret', True), ('', False)])
-    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    prompts, answers = [], iter([('sécret', True), ('', False)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: prompts.append(a[2]) or next(answers))
     select(d, '10.0.0.6')
     d.install_current()
-    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and len(prompts) == 2)
     QApplication.processEvents()
-    assert 'plain letters' in d.detail.text()
+    assert 'plain letters' in d.detail.text() and 'Check the TV is on' not in d.detail.text()
+    assert 'plain letters' in prompts[1] and "didn't work" not in prompts[1]
+
+
+
+# ------------------------------------------------------------------ 4959f71 review
+class Refusing(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(403)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+
+def test_a_refused_question_is_closed(monkeypatch):
+    closed = []
+    real = urllib.error.HTTPError.close
+
+    def close(self):
+        closed.append(self.code)
+        return real(self)
+    monkeypatch.setattr(urllib.error.HTTPError, 'close', close)
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), Refusing)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(roku.Blocked):
+            roku._get(f'http://127.0.0.1:{srv.server_address[1]}/query/apps')
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert 403 in closed
+
+
+def test_no_connection_once_the_outer_call_is_out_of_time(monkeypatch):
+    made = []
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: made.append(1))
+    monkeypatch.setattr(roku._watchdog, 'watch', lambda d: None)
+
+    def outer():
+        time.sleep(0.3)                             # the outer call's time is up; the inner one still has some
+        roku.within(60, lambda: roku._Connection('127.0.0.1', 9, timeout=5).connect())
+    with pytest.raises(roku.TookTooLong):
+        roku.within(0.1, outer)
+    assert made == []

@@ -203,6 +203,10 @@ class _Deadline:
     def left(self):
         return max(0.05, self.end - time.monotonic())
 
+    def over(self):
+        """Time is up for this call, or for a call it runs inside (the watchdog may not have said so yet)."""
+        return self.expired or time.monotonic() >= self.end or (self.outer is not None and self.outer.over())
+
     def add(self, sock):
         with self.lock:
             if self.expired:
@@ -291,7 +295,7 @@ _current = threading.local()            # the deadline of the call running in th
 class _Connection(http.client.HTTPConnection):
     def connect(self):
         deadline = getattr(_current, 'deadline', None)
-        if deadline is not None and (deadline.expired or time.monotonic() >= deadline.end):
+        if deadline is not None and deadline.over():
             deadline.cut = True                # time is up: no new connection to the TV (on any path)
             raise socket.timeout('The time ran out before connecting')
         if deadline is not None:               # connecting counts too: a little past the time left, so the
@@ -300,7 +304,7 @@ class _Connection(http.client.HTTPConnection):
         try:
             super().connect()
         except (TimeoutError, socket.timeout):
-            if deadline is not None and (deadline.expired or time.monotonic() >= deadline.end):
+            if deadline is not None and deadline.over():
                 deadline.cut = True            # it was the time limit that ended the connect
             raise
         if deadline is not None:
@@ -309,7 +313,9 @@ class _Connection(http.client.HTTPConnection):
     def request(self, method, url, body=None, headers={}, **kw):
         deadline = getattr(_current, 'deadline', None)
         if deadline is not None:
-            deadline.sent(False)               # this request's own
+            # this request's own, and before anything else: http.client connects inside request(), and if that
+            # connect is refused for time, "sent" must already say this request (a retry, say) didn't go
+            deadline.sent(False)
         super().request(method, url, body, headers, **kw)
         if deadline is not None and body and any(k.lower() == 'authorization' for k in headers):
             deadline.sent(True)
@@ -397,6 +403,10 @@ class Unrecognised(_OwnError):
     pass
 
 
+class UnusablePassword(_OwnError):
+    """A password no Roku could have (checked before any TV is asked)."""
+
+
 class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
     """Digest auth with one try: a refusal of the password is the wrong password (not five more uploads of the
     app). The one exception is a "stale" nonce (the TV wants a fresh one, the password was fine): one retry."""
@@ -469,7 +479,7 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     """Upload the TV app. Returns the TV's message ('Install Success.' ...). Raises WrongPassword when the TV
     refuses the password, OSError when the install fails or nothing answers. The app opens on the TV."""
     if not password.isascii():                   # a Roku's developer password is plain ASCII: this one can't be it
-        raise WrongPassword('A Roku developer password uses only plain letters, digits and symbols')
+        raise UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
     url = f'http://{ip}:{port}/plugin_install' if port != 80 else f'http://{ip}/plugin_install'
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, url, DEV_USER, password)
@@ -491,7 +501,7 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
         if e.code == 401 and not req.unredirected_hdrs.get('Authorization'):   # never got as far as a password
             raise Unrecognised(UNRECOGNISED) from e
         if e.code == 401:
-            raise WrongPassword('The TV did not accept that developer password') from e
+            raise WrongPassword('The TV did not accept that developer password.') from e
         raise OSError(f'The TV answered {e.code}') from e
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
     msg = ' '.join(m.strip() for m in msgs if m.strip())
