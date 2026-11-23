@@ -649,9 +649,60 @@ def test_an_error_that_lasts_stops_holding_collections(tmp_path, monkeypatch):
     lb.set_folders([{'path': str(tmp_path / 'm')}])
     lb.items(0)
     assert lb._incomplete
-    t = library.time.monotonic()
-    monkeypatch.setattr(library.time, 'monotonic', lambda: t + library.ERROR_GRACE + 1)
+    t = library.time.time()
+    lb2 = library.Library(lb.dir)                  # PLAY restarts: the clock is kept in library.json
+    monkeypatch.setattr(library.time, 'time', lambda: t + library.ERROR_GRACE + 1)
+    lb2.scan()
+    assert not lb2._incomplete
+    lb2.scan()
+    assert not lb2._incomplete                     # and it stays that way
+
+
+# ------------------------------------------------------------------ 6f019bc review
+def test_a_new_kids_link_counts_without_a_restart(tmp_path):
+    make(str(tmp_path / 'Movies' / 'Animated'), 'Toy Shelf.mp4')
+    kids = tmp_path / 'Kids'
+    kids.mkdir()
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'Movies')}, {'path': str(kids), 'kids': True}])
+    assert not lb.items(0)[0]['kids']
+    _junction(kids / 'Cartoons', tmp_path / 'Movies' / 'Animated')
     lb.scan()
-    assert not lb._incomplete
+    assert lb.current()[0]['kids']
+
+
+def test_an_offline_link_stops_holding_collections_after_a_day(tmp_path, monkeypatch):
+    films = tmp_path / 'OtherDrive'
+    make(str(films), 'Alien 1979.mkv')
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    _junction(root / 'More', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    lb.items(0)
+    os.rename(str(films), str(tmp_path / 'gone'))
     lb.scan()
-    assert not lb._incomplete                      # and it stays that way
+    assert lb._incomplete and lb.unreachable
+    t = library.time.time()
+    monkeypatch.setattr(library.time, 'time', lambda: t + library.ERROR_GRACE + 1)
+    lb.scan()
+    assert not lb._incomplete and lb.unreachable   # still named in the notice, no longer holding things back
+
+
+def test_an_unreached_media_folder_keeps_its_error_clock(tmp_path, monkeypatch):
+    make(str(tmp_path / 'nas' / 'Locked'), 'x.mkv')
+    make(str(tmp_path / 'nas'), 'Heat 1995.mkv')
+    real = os.scandir
+
+    def scandir(p):
+        if str(p).endswith('Locked'):
+            raise PermissionError('denied')
+        return real(p)
+    monkeypatch.setattr(library.os, 'scandir', scandir)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'nas')}])
+    lb.items(0)
+    first = dict(lb.data['unreadable_since'])
+    os.rename(str(tmp_path / 'nas'), str(tmp_path / 'asleep'))
+    lb.scan()                                      # the NAS sleeps
+    assert lb.data['unreadable_since'] == first

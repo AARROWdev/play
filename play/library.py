@@ -211,6 +211,9 @@ class Library:
                             and all(isinstance(m, str) for m in v['members'])},
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
+            # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
+            'unreadable_since': {k: v for k, v in _dict(d.get('unreadable_since')).items()
+                                 if isinstance(k, str) and isinstance(v, (int, float))},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")
@@ -220,9 +223,9 @@ class Library:
         self.fpcache = {k: v for k, v in _read_json(self.cache_path, {}).items()
                         if isinstance(v, list) and len(v) == 3 and isinstance(v[2], str)}
         self._raw = {}             # normcased root -> [(fp, path, ext, size, real)] from the last walk reaching it
-        self._reaches = {}         # normcased root -> fingerprints it reaches inside another media folder
+        self._into = {}            # normcased root -> real folders of other media folders it reaches (links,
+                                   # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
-        self._err_since = {}       # normcased path -> when it first couldn't be read (monotonic)
         self._live_roots = set()   # roots the last walk reached (their files win over kept ones)
         self._raw_sig = None
         self._pending = {}         # normcased path -> [size, mtime_ns, first seen (monotonic)] of an unsettled file
@@ -327,7 +330,9 @@ class Library:
             real_roots = set(real_of.values())
             raw, reached, new_pending, dirty, errored, links_off, into = {}, set(), {}, False, [], [], {}
             by_real, listings, all_errs = {}, {}, []
-            now_m = time.monotonic()
+            now_w = time.time()
+            with self.lock:
+                since = dict(self.data['unreadable_since'])
             for f, root in zip(folders, roots):
                 others = [r for r in roots if r != root and r.startswith(root.rstrip(os.sep) + os.sep)]
                 files, ok, changed, errs, off, into[root] = _walk(
@@ -340,9 +345,10 @@ class Library:
                     have = {os.path.normcase(e[1]) for e in files}
                     raw[root] = files + [e for e in keep if os.path.normcase(e[1]) not in have]
                     reached.add(root)
-                    all_errs += errs
-                    errored += [p for p in errs if now_m - self._err_since.setdefault(p, now_m) < ERROR_GRACE]
-                    errored += [os.path.normcase(o) for o in off]
+                    lost_now = errs + [os.path.normcase(o) for o in off]
+                    all_errs += lost_now
+                    # a hiccup holds collections back; something unreadable for over a day is how it is now
+                    errored += [p for p in lost_now if now_w - since.setdefault(p, now_w) < ERROR_GRACE]
                     links_off += off
             unreachable = []
             for f, root in zip(folders, roots):
@@ -354,25 +360,26 @@ class Library:
                      and (_under(k, reached) or not _under(k, roots))]
             for k in stale:
                 del cache[k]
-            sig = hash(tuple((r, tuple(raw[r])) for r in sorted(raw))) ^ hash(tuple(sorted(reached)))
+            for root in roots:
+                if root not in reached:              # its links weren't looked at: keep what they reached
+                    into[root] = self._into.get(root, [])
+            sig = hash(tuple((r, tuple(raw[r])) for r in sorted(raw))) ^ hash(tuple(sorted(reached))) ^ \
+                hash(tuple((r, tuple(sorted(into[r]))) for r in sorted(into)))
+            # forget a path once it reads again; one under a folder that wasn't reached keeps its clock
+            since = {p: t for p, t in since.items() if p in set(all_errs) or not _under(p, reached)}
             with self.lock:
                 self.fpcache = cache
                 self._pending = new_pending
                 self._raw = raw
                 self._live_roots = reached
-                # per media folder: the files it reaches inside another media folder (a link into it, or that
-                # folder nested in it). Worked out once per scan; _rebuild applies the Kids flags as they are now.
-                self._reaches = {}
-                for root, targets in into.items():
-                    if targets:
-                        self._reaches[root] = {e[0] for files in raw.values() for e in files
-                                               if _under(e[4], targets)}
+                self._into = into
+                if since != self.data['unreadable_since']:
+                    self.data['unreadable_since'] = since
+                    self._save_after_scan = True
                 # media folders and links that are offline (a subfolder Windows won't list isn't news) ...
                 self.unreachable = unreachable + sorted(set(links_off))
                 # ... but anything not fully read means "missing" can't be told from "gone" (collections keep it)
                 self._incomplete = bool(unreachable or errored)
-                failing = set(all_errs)              # forget a path once it reads again
-                self._err_since = {p: t for p, t in self._err_since.items() if p in failing}
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
@@ -437,13 +444,17 @@ class Library:
         self._col_of = {m: cid for cid, c in self.data['collections'].items() for m in c['members']}
         found, reals = {}, {}
         folders = [(f, os.path.normcase(os.path.abspath(f['path']))) for f in self.data['folders']]
+        # what a Kids folder reaches inside another media folder (Kids\Cartoons -> Movies\Animated) is Kids too,
+        # though the other folder's walk lists it; the Kids switches as they are now
+        kids_into = [t for f, root in folders if f.get('kids') for t in self._into.get(root, ())]
         # folders the last walk reached first: a live copy of a file beats a remembered one on a missing drive
         for live in (True, False):
             for f, root in folders:
                 if (root in self._live_roots) != live:
                     continue
                 for fp, path, ext, size, real in self._raw.get(root, []):
-                    if f.get('kids') and self._tag_kids_once(fp):
+                    kids = f.get('kids') or (kids_into and _under(real, kids_into))
+                    if kids and self._tag_kids_once(fp):
                         self._save_after_scan = True
                         if fp in found:
                             found[fp]['kids'] = True
@@ -454,12 +465,6 @@ class Library:
                         continue
                     found[fp] = self._item(fp, path, f['path'], ext, size)
                     reals[fp] = {real}
-        # a Kids folder with a link into another media folder (Kids\Cartoons -> Movies\Animated): files there
-        # are Kids too, though the other folder's walk lists them
-        for fp in {fp for f, root in folders if f.get('kids') for fp in self._reaches.get(root, ())}:
-            if fp in found and self._tag_kids_once(fp):
-                self._save_after_scan = True
-                found[fp]['kids'] = True
         items = sorted(found.values(), key=lambda i: (names.sort_key(i['title']), i.get('season') or 0,
                                                       i.get('episode') or 0))
         _mark_problems(items)                  # before publishing: readers on other threads see finished items
@@ -796,15 +801,8 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             if entries is None:
                 with os.scandir(d) as it:
                     entries = sorted(it, key=lambda e: e.name)
-                if d_real != os.path.normcase(d):  # reached through a link: another walk may reach it too
-                    for e in entries:              # read now (kept in the entry), so that walk reuses it
-                        try:
-                            if not _dir_link(e) and not e.is_dir(follow_symlinks=False) and \
-                                    os.path.splitext(e.name)[1].lower() in names.VIDEO_EXTS:
-                                e.stat()
-                        except OSError:
-                            pass
-                    listings[d_real] = entries
+                if d_real != os.path.normcase(d):  # reached through a link: another walk may reach it too,
+                    listings[d_real] = entries     # and reuses these entries (and the stats they keep)
         except OSError:
             if d == root:
                 return [], False, False, [], [], []

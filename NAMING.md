@@ -98,3 +98,9 @@ HandBrake.
 Drop them into a media folder. With PLAY's window open it looks every few seconds, from the tray every 30 seconds;
 a new file is listed once it has stopped changing for 10 seconds (so a file still being copied isn't half-read).
 The TV shows it the next time you open HOME or KIDS. Nothing needs restarting.
+
+## Capital letters in folder names
+
+PLAY treats paths the way Windows does: `Movies` and `MOVIES` are the same folder. On the rare folder made
+case-sensitive (for WSL, with `fsutil file setCaseSensitiveInfo`), two sibling folders whose names differ only in
+capital letters are read as one; give them different names.

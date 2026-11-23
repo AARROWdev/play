@@ -353,6 +353,8 @@ def test_shown_addresses_include_home_with_a_vpn_and_with_a_vm_adapter(monkeypat
     assert setup('10.0.0.201', ['10.0.0.201', '192.168.56.1', '192.168.137.1'])[0] == '10.0.0.201'
     # a VPN default route plus a VirtualBox adapter: home 10.x is still shown second
     assert setup('10.8.0.6', ['10.8.0.6', '192.168.56.1', '192.168.80.1', '10.0.0.201']) == ['10.8.0.6', '10.0.0.201']
+    # VPN + hotspot + home: home comes before the hotspot
+    assert setup('10.8.0.6', ['10.8.0.6', '192.168.137.1', '10.0.0.201']) == ['10.8.0.6', '10.0.0.201']
     # Mobile Hotspot's fixed address is not demoted like a VM adapter
     assert setup('10.0.0.201', ['10.0.0.201', '192.168.56.1', '192.168.137.1']) == ['10.0.0.201', '192.168.137.1']
 

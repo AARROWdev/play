@@ -44,10 +44,11 @@ _ips_cache = (0.0, [])
 
 
 def lan_ips(max_age=30.0):
-    """This PC's private IPv4 addresses (what a TV would type), most likely first: the default route, then
-    192.168.x.x, then the rest. A Tailscale/CGNAT address (100.64.0.0/10) is never offered. A VPN's or a virtual
-    machine adapter's or Mobile Hotspot's private address can't be told from the home network's by its number, so
-    the window shows two and lists them all in its tooltip. Cached for 30 s (the window asks every 1.5 s); forget_lan_ips() starts over."""
+    """This PC's private IPv4 addresses (what a TV would type), most likely first: the default route, then the
+    others (192.168.x.x first), then Mobile Hotspot's 192.168.137.1, then virtual machine adapters (x.x.x.1). A
+    Tailscale/CGNAT address (100.64.0.0/10) is never offered. Which one a TV is on can't be told from here, so the
+    window shows two and lists them all in its tooltip. Cached for 30 s (the window asks every 1.5 s);
+    forget_lan_ips() starts over."""
     global _ips_cache
     t, ips = _ips_cache
     if time.monotonic() - t < max_age and t:
@@ -75,12 +76,14 @@ def _find_lan_ips():
         if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
             ips.append(ip)
     primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
-    # the default route first (the home network, or with a full-tunnel VPN the VPN). A VMware/VirtualBox/Hyper-V
-    # adapter gives the PC its subnet's .1 (on a home network .1 is the router), so those go last, except Mobile
-    # Hotspot's fixed 192.168.137.1, where TVs on the PC's hotspot find it. Then 192.168.x.x before the rest.
-    # The window shows two and lists every one in its tooltip.
-    return sorted(ips, key=lambda ip: (ip != primary, ip.endswith('.1') and ip != HOTSPOT_IP,
-                                       not ip.startswith('192.168.'), ip.startswith('172.'), ipaddress.ip_address(ip)))
+    # the default route first (the home network, or with a full-tunnel VPN the VPN); then the other addresses
+    # (192.168.x.x first); then Mobile Hotspot's fixed 192.168.137.1; then any other x.x.x.1, which is a
+    # VMware/VirtualBox/Hyper-V adapter (on a home network .1 is the router, never this PC). The window shows two
+    # and lists every one in its tooltip.
+    def rank(ip):
+        return 0 if ip == primary else 2 if ip == HOTSPOT_IP else 3 if ip.endswith('.1') else 1
+    return sorted(ips, key=lambda ip: (rank(ip), not ip.startswith('192.168.'), ip.startswith('172.'),
+                                       ipaddress.ip_address(ip)))
 
 
 HOTSPOT_IP = '192.168.137.1'                         # Windows Mobile Hotspot / Internet Connection Sharing

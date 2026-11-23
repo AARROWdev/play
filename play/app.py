@@ -1012,20 +1012,22 @@ def offer_autostart(lib, installed):
     turn it back on at every start). Returns True if it turned it on."""
     if not installed or lib.data['autostart_offered'] or lib.read_only:
         return False
+    def unoffer():
+        with lib.lock:
+            lib.data['autostart_offered'] = False
+        try:
+            lib.save()                             # after the reset: a scan's save in between is overwritten
+        except OSError:
+            pass
     try:
         lib.set_value('autostart_offered', True)   # recorded first: if it can't be, nothing is switched on
     except OSError:
-        with lib.lock:
-            lib.data['autostart_offered'] = False
+        unoffer()
         return False
     try:
         set_autostart(True)
     except OSError:                                # not switched on after all: offer it again next start
-        try:
-            lib.set_value('autostart_offered', False)
-        except OSError:
-            with lib.lock:
-                lib.data['autostart_offered'] = False
+        unoffer()
         return False
     return True
 
