@@ -355,13 +355,13 @@ class TvSetupDialog(QDialog):
             return
         self._start_install(ip, pw, stored)
 
-    def _start_install(self, ip, pw, stored=False):
+    def _start_install(self, ip, pw, stored):
         self.tv[ip].update(status=INSTALLING, msg='')
         self._row(ip)
         self._details()
         self._run(self._install_worker, ip, pw, self._next(ip), stored)
 
-    def _install_worker(self, ip, pw, gen=0, stored=False):
+    def _install_worker(self, ip, pw, gen, stored):
         st = {'install': True, 'gen': gen, 'pw_problem': False, 'stored': stored}   # (every outcome says whether it's the password)
         try:
             st['msg'] = self.net.install(ip, pw, self.net.package())

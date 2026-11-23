@@ -337,7 +337,9 @@ def within(seconds, fn, *args):
     so it can't hold a worker, or the wizard waiting for it, and nothing of it carries on. Raises TookTooLong
     for what the cut-off caused (an answer the TV gave in time, like a 401, is passed on as it is)."""
     outer = getattr(_current, 'deadline', None)
-    deadline = _Deadline(min(seconds, outer.left()) if outer is not None else seconds, outer)   # never past it
+    # an inner call is given no more than the outer one has left (at least 0.05 s: near the end it can run that
+    # far past it; connect's over() checks the whole chain, so no connection starts once any of them is out)
+    deadline = _Deadline(min(seconds, outer.left()) if outer is not None else seconds, outer)
     _current.deadline = deadline
     _watchdog.watch(deadline)
     try:

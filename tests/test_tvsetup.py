@@ -1360,7 +1360,7 @@ def test_an_unusable_password_while_closed_is_asked_on_reopen(qapp, tmp_path, mo
     monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: prompts.append(a[2]) or ('sécret', True))
     select(d, '10.0.0.6')
     d.release()                                     # closed before the result is in
-    d._start_install('10.0.0.6', 'sécret')
+    d._start_install('10.0.0.6', 'sécret', False)
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
     QApplication.processEvents()
     assert prompts == [] and d.tv['10.0.0.6'].get('ask_again')
@@ -1396,4 +1396,5 @@ def test_a_typed_unusable_password_keeps_a_good_stored_one(qapp, tmp_path, monke
     d._retry('10.0.0.6')                            # the retry prompt: a typed password, unusable
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and d.tv['10.0.0.6'].get('msg') != 'x')
     QApplication.processEvents()
+    assert 'plain letters' in d.tv['10.0.0.6']['msg']                        # it was the unusable password
     assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:good'}   # a typed one never forgets it
