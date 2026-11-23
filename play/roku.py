@@ -201,7 +201,11 @@ class _Deadline:
         self.uploaded = False                  # the latest request: a body, with a password, went out in full
 
     def left(self):
-        return max(0.05, self.end - time.monotonic())
+        """Seconds left, for this call and any it runs inside (the soonest end counts)."""
+        t = self.end - time.monotonic()
+        if self.outer is not None:
+            t = min(t, self.outer.left())
+        return max(0.05, t)
 
     def over(self):
         """Time is up for this call, or for a call it runs inside (the watchdog may not have said so yet)."""
@@ -476,8 +480,10 @@ def _multipart(fields, files):
 
 
 def install(ip, password, zip_bytes, timeout=120, port=80):
-    """Upload the TV app. Returns the TV's message ('Install Success.' ...). Raises WrongPassword when the TV
-    refuses the password, OSError when the install fails or nothing answers. The app opens on the TV."""
+    """Upload the TV app. Returns the TV's message ('Install Success.' ...). Raises UnusablePassword for a
+    password no Roku could have (before any TV is asked), WrongPassword when the TV refuses the password,
+    Unrecognised for a password challenge PLAY can't answer, TookTooLong when time runs out, OSError when the
+    install fails or nothing answers. The app opens on the TV."""
     if not password.isascii():                   # a Roku's developer password is plain ASCII: this one can't be it
         raise UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
     url = f'http://{ip}:{port}/plugin_install' if port != 80 else f'http://{ip}/plugin_install'

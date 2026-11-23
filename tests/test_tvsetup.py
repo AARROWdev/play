@@ -1174,7 +1174,7 @@ def test_a_refusal_leaves_nothing_open(tv):
     assert e.value.__cause__.fp.closed
 
 
-def test_a_password_with_accents_is_a_wrong_password(monkeypatch):
+def test_a_password_with_accents_is_an_unusable_password(monkeypatch):
     monkeypatch.setattr(roku._Connection, 'connect', lambda self: (_ for _ in ()).throw(AssertionError('connected')))
     with pytest.raises(roku.UnusablePassword, match='plain letters'):
         roku.install('127.0.0.1', 'sécret', b'ZIP', port=9)
@@ -1264,11 +1264,60 @@ def test_a_refused_question_is_closed(monkeypatch):
 def test_no_connection_once_the_outer_call_is_out_of_time(monkeypatch):
     made = []
     monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: made.append(1))
-    monkeypatch.setattr(roku._watchdog, 'watch', lambda d: None)
+    outer = roku._Deadline(60)
+    outer.expired = True                            # the outer call's time is up ...
+    inner = roku._Deadline(60, outer)               # ... while the inner one has plenty (by its own clock)
+    monkeypatch.setattr(roku._current, 'deadline', inner, raising=False)
+    with pytest.raises(socket.timeout):
+        roku._Connection('127.0.0.1', 9, timeout=5).connect()
+    assert made == [] and inner.cut
 
-    def outer():
-        time.sleep(0.3)                             # the outer call's time is up; the inner one still has some
-        roku.within(60, lambda: roku._Connection('127.0.0.1', 9, timeout=5).connect())
-    with pytest.raises(roku.TookTooLong):
-        roku.within(0.1, outer)
-    assert made == []
+
+def test_time_left_counts_the_outer_call():
+    outer = roku._Deadline(0.5)
+    inner = roku._Deadline(60, outer)
+    assert inner.left() <= 0.5
+
+
+
+# ------------------------------------------------------------------ bff131d review
+def test_a_password_problem_doesnt_stick_to_later_failures(qapp, tmp_path, monkeypatch):
+    outcomes = iter([roku.UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.'),
+                     OSError('The TV answered 500')])
+
+    class Flaky(FakeNet):
+        def install(self, ip, pw, data):
+            raise next(outcomes)
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:kept'})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Flaky({'10.0.0.6': {
+        'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('fine', True))
+    monkeypatch.setattr(d.net, 'unprotect', lambda token: 'sécret')          # a bad one was stored somehow
+    select(d, '10.0.0.6')
+    d.install_current()                                                     # unusable, then asked again ...
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and 'answered 500' in d.tv['10.0.0.6']['msg'])
+    QApplication.processEvents()
+    assert "can't be used" not in d.detail.text() and 'Check the TV is on' in d.detail.text()
+
+
+def test_an_unusable_password_doesnt_forget_the_stored_one(qapp, tmp_path, monkeypatch):
+    class Unusable(FakeNet):
+        def install(self, ip, pw, data):
+            raise roku.UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:kept'})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Unusable({'10.0.0.6': {
+        'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    answers = iter([('sécret', True), ('', False)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    monkeypatch.setattr(d.net, 'unprotect', lambda token: None)              # so it asks
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:kept'}

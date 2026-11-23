@@ -213,18 +213,18 @@ class TvSetupDialog(QDialog):
     def _set(self, ip, st):
         if st.get('gen', self.gen.get(ip, 0)) != self.gen.get(ip, 0):
             return                                      # a check or install that something newer replaced
-        wrong = st.get('wrong')
+        wrong = st.get('wrong')                         # the TV refused the password: forget it, ask again
+        ask = wrong or st.get('ask_pw')                 # ask again (also for one no TV was asked about)
         if 'pw' in st or wrong:
             _after_install(self, ip, st)
-            st = {k: v for k, v in st.items() if k not in ('pw', 'wrong')}
-        st = {k: v for k, v in st.items() if k not in ('install', 'gen')}
+        st = {k: v for k, v in st.items() if k not in ('pw', 'wrong', 'ask_pw', 'install', 'gen')}
         cur = self.tv.setdefault(ip, {'status': CHECKING, 'info': None, 'app': None, 'msg': ''})
         cur.update(st)
         self._row(ip)
         self._details()
-        if wrong and self.closing:                      # ask again, once: when it's opened again
+        if ask and self.closing:                        # ask again, once: when it's opened again
             cur['ask_again'] = True
-        elif wrong:
+        elif ask:
             QTimer.singleShot(0, lambda: self._retry(ip))
 
     def _retry(self, ip):
@@ -351,13 +351,13 @@ class TvSetupDialog(QDialog):
         self._start_install(ip, pw)
 
     def _start_install(self, ip, pw):
-        self.tv[ip].update(status=INSTALLING, msg='')
+        self.tv[ip].update(status=INSTALLING, msg='', pw_problem=False)
         self._row(ip)
         self._details()
         self._run(self._install_worker, ip, pw, self._next(ip))
 
     def _install_worker(self, ip, pw, gen=0):
-        st = {'install': True, 'gen': gen}
+        st = {'install': True, 'gen': gen, 'pw_problem': False}   # (every outcome says whether it's the password)
         try:
             st['msg'] = self.net.install(ip, pw, self.net.package())
             st['status'] = DONE
@@ -367,8 +367,8 @@ class TvSetupDialog(QDialog):
             # the app was sent, with the password, but no answer came: it may or may not be on the TV. Nothing
             # says the password worked, so it isn't kept.
             st['status'], st['msg'] = (UNSURE if e.uploaded else FAILED), str(e)
-        except roku.UnusablePassword as e:           # no TV was asked: say why, and ask again
-            st['status'], st['wrong'], st['pw_problem'] = FAILED, True, True
+        except roku.UnusablePassword as e:           # no TV was asked: say why, and ask again (nothing to forget)
+            st['status'], st['ask_pw'], st['pw_problem'] = FAILED, True, True
             st['msg'] = str(e)
         except roku.WrongPassword as e:
             st['status'], st['wrong'], st['pw_problem'] = FAILED, True, False
