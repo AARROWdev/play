@@ -127,6 +127,7 @@ def tv():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield srv.server_address[1]
     srv.shutdown()
+    srv.server_close()
     FakeInstaller.stale_once = FakeInstaller.stale_always = False
     FakeInstaller.preflight_404 = FakeInstaller.refuse_bare = False
 
@@ -453,6 +454,7 @@ def ecp():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f'http://127.0.0.1:{srv.server_address[1]}/query/device-info'
     srv.shutdown()
+    srv.server_close()
 
 
 def test_the_app_is_uploaded_once(tv):
@@ -493,6 +495,7 @@ def test_questions_go_direct_and_dont_follow_redirects(ecp, monkeypatch):
             roku._get(ecp)
     finally:
         target.shutdown()
+        target.server_close()
 
 
 class SlowEcp(BaseHTTPRequestHandler):
@@ -524,6 +527,7 @@ def test_a_request_that_trickles_along_is_cut_off(monkeypatch):
         assert len([th for th in threading.enumerate() if th.name == 'play-deadline']) <= 1   # one, shared
     finally:
         srv.shutdown()
+        srv.server_close()
     assert roku.within(1, lambda: 'ok') == 'ok'
     with pytest.raises(KeyError):
         roku.within(1, {}.__getitem__, 'x')                                   # its own errors come through
@@ -797,6 +801,7 @@ def slow_tv():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield srv.server_address[1]
     srv.shutdown()
+    srv.server_close()
 
 
 def test_no_answer_after_sending_the_app_with_the_password(slow_tv):
@@ -874,6 +879,7 @@ def test_the_watchdog_stays_up_after_a_cut_off(monkeypatch):
             roku._get(f'http://127.0.0.1:{srv.server_address[1]}/query/device-info')
     finally:
         srv.shutdown()
+        srv.server_close()
     time.sleep(0.2)
     assert roku._watchdog.thread is not None and roku._watchdog.thread.is_alive()
 
@@ -893,7 +899,7 @@ def test_the_watchdog_rests_when_idle_and_wakes_again():
 
 def test_a_connect_that_times_out_at_the_end_is_too_long(monkeypatch):
     def connect(self):
-        time.sleep(self.timeout)
+        time.sleep(min(self.timeout, 2))
         raise socket.timeout('timed out')
     monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', connect)
     with pytest.raises(roku.TookTooLong):
@@ -948,6 +954,7 @@ def test_a_bare_upload_doesnt_count_as_sent(monkeypatch):
         assert not e.value.uploaded                 # so the wizard says it failed, not "may have reached"
     finally:
         srv.shutdown()
+        srv.server_close()
 
 
 def test_a_call_inside_a_call_reports_what_it_sent():
@@ -1059,22 +1066,28 @@ def test_a_stale_challenge_that_cant_be_answered_isnt_a_wrong_password(tv, monke
 
 
 def test_the_401_is_finished_with_before_the_password_goes(tv, monkeypatch):
-    closed = []
     import http.client as hc
-    real_close = hc.HTTPResponse.close
+    answers, open_at_upload = [], []
+    real_begin, real_request = hc.HTTPResponse.begin, roku._Connection.request
 
-    def close(self):
-        closed.append(self.status)
-        return real_close(self)
-    monkeypatch.setattr(hc.HTTPResponse, 'close', close)
+    def begin(self):
+        real_begin(self)
+        answers.append(self)
+
+    def request(self, method, url, body=None, headers={}, **kw):
+        if body and 'Authorization' in headers:     # the password goes: every 401 before it must be closed
+            open_at_upload.extend(r for r in answers if r.status == 401 and not r.isclosed())
+        return real_request(self, method, url, body, headers, **kw)
+    monkeypatch.setattr(hc.HTTPResponse, 'begin', begin)
+    monkeypatch.setattr(roku._Connection, 'request', request)
     FakeInstaller.preflight_404 = True              # the upload itself gets the 401, then the retry goes
     roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
-    assert 401 in closed
+    assert any(r.status == 401 for r in answers) and open_at_upload == []
 
 
 def test_a_late_watchdog_still_counts_a_connect_timeout(monkeypatch):
     def connect(self):
-        time.sleep(self.timeout)
+        time.sleep(min(self.timeout, 2))
         raise socket.timeout('timed out')
     monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', connect)
     monkeypatch.setattr(roku._watchdog, 'watch', lambda d: None)             # the watchdog never gets to it
@@ -1096,3 +1109,72 @@ def test_a_connection_made_after_the_cut_off_counts_as_cut():
     d.expired = True
     d.add(Sock())
     assert d.cut and Sock.closed
+
+
+
+# ------------------------------------------------------------------ d877e7f review
+def test_a_slow_401_body_doesnt_hold_up_the_password(monkeypatch):
+    class SlowBody401(FakeInstaller):
+        def _challenge(self, stale=False):
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Digest realm="rokudev", nonce="n0nce", qop="auth"')
+            self.send_header('Content-Length', '100000')
+            self.end_headers()
+            try:
+                self.wfile.write(b'x')
+                self.wfile.flush()
+                time.sleep(5)                       # the rest of the body never comes in time
+            except OSError:
+                pass
+    FakeInstaller.attempts, FakeInstaller.nonce = 0, 'n0nce'
+    monkeypatch.setattr(FakeInstaller, 'preflight_404', True)
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), SlowBody401)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        t = time.monotonic()
+        assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIP', timeout=10, port=srv.server_address[1])
+        assert time.monotonic() - t < 3
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_no_new_connection_after_the_time_is_up(monkeypatch):
+    connects = []
+    real = roku._Connection.connect
+
+    def connect(self):
+        connects.append(time.monotonic())
+        return real(self)
+    monkeypatch.setattr(roku._Connection, 'connect', connect)
+
+    real_answer = roku._OnceDigest.get_authorization
+
+    def slow_answer(self, req, chal):               # the time runs out while the challenge is being answered
+        time.sleep(0.8)
+        return real_answer(self, req, chal)
+    monkeypatch.setattr(roku._OnceDigest, 'get_authorization', slow_answer)
+    FakeInstaller.attempts, FakeInstaller.nonce = 0, 'n0nce'
+    monkeypatch.setattr(FakeInstaller, 'preflight_404', True)
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), FakeInstaller)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(OSError):
+            roku.install('127.0.0.1', 'secret', b'ZIP', timeout=0.5, port=srv.server_address[1])
+        assert len(connects) <= 2                   # the GET and the upload; no third for the password
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_refusal_leaves_nothing_open(tv):
+    FakeInstaller.refuse_bare = True
+    with pytest.raises(roku.WrongPassword) as e:
+        roku.install('127.0.0.1', 'nope', b'ZIP', port=tv)
+    cause = e.value.__cause__
+    assert cause.fp is None or cause.fp.closed
+
+
+def test_a_password_with_accents_is_a_wrong_password():
+    with pytest.raises(roku.WrongPassword):
+        roku.install('127.0.0.1', 'sécret', b'ZIP', port=9)

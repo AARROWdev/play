@@ -398,19 +398,18 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
     app). The one exception is a "stale" nonce (the TV wants a fresh one, the password was fine): one retry."""
 
     def http_error_401(self, req, fp, code, msg, headers):
+        fp.close()                                              # this answer is done with (its body isn't needed)
         chal = _challenge(headers.get('WWW-Authenticate'))    # parsed once, here
         if req.unredirected_hdrs.get('Authorization'):          # the password went: this is the TV's answer to it
             if chal.get('stale', '').lower() != 'true' or getattr(req, '_play_stale_retry', False):
-                raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)   # refused
+                raise urllib.error.HTTPError(req.full_url, code, msg, headers, None)   # refused
             req._play_stale_retry = True
         value = self.get_authorization(req, chal)
         if not value:                                           # a challenge it can't answer (NTLM, Basic, blank,
             raise Unrecognised(UNRECOGNISED)                    # no realm): not how a Roku asks, nor a refusal
-        try:                                                    # this answer is done with: free its connection
-            fp.read(65536)
-            fp.close()
-        except (OSError, http.client.HTTPException):
-            pass
+        deadline = getattr(_current, 'deadline', None)
+        if deadline is not None and deadline.expired:           # time is up: no new connection to the TV
+            raise ConnectionAbortedError('The time ran out before the password could go')
         req.add_unredirected_header(self.auth_header, f'Digest {value}')
         return self.parent.open(req, timeout=req.timeout)       # (its own errors are its own)
 
@@ -468,6 +467,8 @@ def _multipart(fields, files):
 def install(ip, password, zip_bytes, timeout=120, port=80):
     """Upload the TV app. Returns the TV's message ('Install Success.' ...). Raises WrongPassword when the TV
     refuses the password, OSError when the install fails or nothing answers. The app opens on the TV."""
+    if not password.isascii():                   # a Roku's developer password is plain ASCII: this one can't be it
+        raise WrongPassword('A Roku developer password uses only plain letters, digits and symbols')
     url = f'http://{ip}:{port}/plugin_install' if port != 80 else f'http://{ip}/plugin_install'
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, url, DEV_USER, password)
@@ -485,6 +486,7 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     try:
         text = within(timeout, send)
     except urllib.error.HTTPError as e:
+        e.close()                                    # its connection is done with, whatever it meant
         if e.code == 401 and not req.unredirected_hdrs.get('Authorization'):   # never got as far as a password
             raise Unrecognised(UNRECOGNISED) from e
         if e.code == 401:
