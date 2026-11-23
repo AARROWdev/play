@@ -790,9 +790,13 @@ def test_an_offline_link_that_is_also_a_media_folder_keeps_its_titles(tmp_path):
     make(str(root), 'Heat 1995.mkv')
     _junction(root / 'Films', films)
     lb = library.Library(str(tmp_path / 'store'))
-    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Films')}])
+    lb.set_folders([{'path': str(root)}])
     assert sorted(i['title'] for i in lb.items(0)) == ['Alien', 'Heat']
     os.rename(str(films), str(tmp_path / 'gone'))
+    lb.scan()
+    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Films')}])   # added while it is offline
+    lb.scan()
+    assert sorted(i['title'] for i in lb.current()) == ['Alien', 'Heat']
     lb.scan()
     assert sorted(i['title'] for i in lb.current()) == ['Alien', 'Heat']
 
@@ -849,3 +853,30 @@ def test_a_media_folder_with_a_trailing_slash_in_the_settings(tmp_path):
                                                  encoding='utf-8')
     lb = library.Library(str(tmp_path / 's'))
     assert lb.folders[0]['path'] == str(root)
+
+
+
+# ------------------------------------------------------------------ 6fb1782 review
+def test_an_unreadable_subfolder_added_as_a_media_folder_keeps_its_titles(tmp_path, monkeypatch):
+    root = tmp_path / 'Media'
+    make(str(root), 'Heat 1995.mkv')
+    make(str(root / 'Locked'), 'Alien 1979.mkv')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(root)}])
+    assert sorted(i['title'] for i in lb.items(0)) == ['Alien', 'Heat']
+    _locked_scandir(monkeypatch)
+    lb.scan()
+    lb.set_folders([{'path': str(root)}, {'path': str(root / 'Locked')}])
+    lb.scan()
+    assert sorted(i['title'] for i in lb.current()) == ['Alien', 'Heat']
+
+
+def test_a_kids_link_that_is_also_its_own_folder_makes_its_films_kids(tmp_path):
+    make(str(tmp_path / 'Movies' / 'Animated'), 'Toy Shelf.mp4')
+    kids = tmp_path / 'Kids'
+    kids.mkdir()
+    _junction(kids / 'Cartoons', tmp_path / 'Movies' / 'Animated')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(kids), 'kids': True}, {'path': str(kids / 'Cartoons')}])
+    (ts,) = lb.items(0)
+    assert ts['kids']

@@ -213,8 +213,8 @@ class Library:
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
-            'unreadable_since': {k: _finite(v) for k, v in _dict(d.get('unreadable_since')).items()
-                                 if isinstance(k, str) and _finite(v) is not None},
+            'unreadable_since': {k: t for k, t in ((k, _finite(v)) for k, v in _dict(d.get('unreadable_since')).items()
+                                                   if isinstance(k, str)) if t is not None},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")
@@ -357,7 +357,11 @@ class Library:
             unreachable = []
             for f, root in zip(folders, roots):
                 if root not in reached:              # NAS asleep, drive not mounted yet: keep what we had
-                    raw[root] = prev_raw.get(root, [])
+                    if root in prev_raw:
+                        raw[root] = prev_raw[root]
+                    else:                            # just added, never read: what other folders' walks saw in it
+                        raw[root] = [e for r, files in prev_raw.items() if r != root for e in files
+                                     if _under(os.path.normcase(e[1]), [root])]
                     unreachable.append(f['path'])
             live = {os.path.normcase(e[1]) for files in raw.values() for e in files}
             stale = [k for k in cache if k not in live and not _under(k, errored)
@@ -844,9 +848,10 @@ def _walk(root, skip_roots, cache, pending, new_pending, first, real_roots=froze
             if _dir_link(e):
                 if e.name.startswith('.') or e.name.lower() == '$recycle.bin':
                     continue                       # '.snapshots', '.backup': not media
-                if os.path.normcase(path) in skip_roots:   # a media folder of its own: its walk reads (or misses) it
-                    if skip_roots[os.path.normcase(path)]:
-                        into_roots.append(skip_roots[os.path.normcase(path)])
+                own = skip_roots.get(os.path.normcase(path), False)
+                if own is not False:               # a media folder of its own: its walk reads (or misses) it
+                    if own:
+                        into_roots.append(own)
                     continue
                 try:
                     real = os.path.normcase(os.path.realpath(path))
