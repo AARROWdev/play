@@ -551,7 +551,12 @@ class Library:
                 if self.data['kids_pending']:
                     lost_now = set(all_lost)
 
-                    def readable_now(p):
+                    def targets_of(p):
+                        """Where the links at or under p lead (into another media folder: its files are listed
+                        under that folder's paths)."""
+                        return [v[1] for lk, v in links.items() if v[1] and (lk == p or _under(lk, [p]))]
+
+                    def read_in_full(p):
                         """Read in full this scan: its media folder was reached (or is gone for good), nothing of
                         it was lost, and no file in it is still settling (not fingerprinted yet)."""
                         mine = owner(p)
@@ -560,12 +565,15 @@ class Library:
                         if any(p == x or _under(p, [x]) or _under(x, [p]) for x in lost_now):
                             return False
                         return not any(_under(k, [p]) for k in sc.new_pending)
+
+                    def readable_now(p):
+                        return all(read_in_full(x) for x in [p] + targets_of(p))   # and where its links lead
                     done = [p for p in self.data['kids_pending'] if readable_now(p)]
                     if done:
                         pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
                         # a pending link into another media folder: its files are listed under that folder's
                         # paths, so they're found by where the link leads
-                        targets = [links[p][1] for p in done if p in links]
+                        targets = [t for p in done for t in targets_of(p)]
                         tpre = tuple(t.rstrip(os.sep) + os.sep for t in targets)
                         tagged = False
                         for files in raw.values():
@@ -806,6 +814,14 @@ class Library:
         self.save()
         return cid
 
+    def kept_unshown(self, cid, shown):
+        """The members of a collection a dialog didn't list (shown: the ids it listed) that a save keeps: films on
+        a drive that's away. A film found in the library is kept too (it wasn't the dialog's to drop); one not found
+        while every media folder could be read is gone for good."""
+        shown = set(shown)
+        return [m for m in self.data['collections'].get(cid, {}).get('members', [])
+                if m not in shown and (m in self._by_id or self._incomplete)]
+
     def update_collection(self, cid, name=None, order=None, members=None, shown=None):
         """members, when given, is the new order of the films the dialog showed (shown: the ids it listed when it
         opened). Films it didn't show (offline then) are kept at their places, unless they are gone for good: not
@@ -820,9 +836,8 @@ class Library:
             if members is not None:
                 # with no dialog behind the call (shown is None), members is the whole new list
                 shown = set(shown) if shown is not None else None
-                hidden = [] if shown is None else [
-                    (i, m) for i, m in enumerate(c['members']) if m not in shown and m not in members
-                    and (m in self._by_id or self._incomplete)]
+                keep = set() if shown is None else set(self.kept_unshown(cid, shown)) - set(members)
+                hidden = [(i, m) for i, m in enumerate(c['members']) if m in keep]
                 new = list(dict.fromkeys(members))
                 for i, m in hidden:                  # back where it was
                     new.insert(min(i, len(new)), m)

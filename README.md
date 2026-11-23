@@ -5,31 +5,31 @@ the files straight from your drives to the TVs in your house.
 
 ![The PLAY library window](docs/library.png)
 
-- **One library, tagged your way.** Point PLAY at your media folders. Kids, movie or show, hidden and collections are
-  tags inside PLAY, not folders, and they follow a file if you rename or move it. Your files are never renamed,
-  moved or changed.
+- **One library, tagged your way.** One media folder to start (add more if you like). Kids, movie or show, hidden
+  and collections are tags inside PLAY, not folders, and they follow a file if you rename or move it. PLAY never
+  renames or changes your files; **Add media** moves the files you pick into your media folder.
 - **Shows grouped for you.** `Show S01E02`, `1x02`, `Season 1 Episode 2` and `Show/Season 1/E02` all work. PLAY spots
   missing and doubled episodes.
-- **Collections.** Seven Jungle films show on the TV as one entry, in release order or your own. PLAY suggests
-  them; you confirm.
-- **HOME and KIDS.** The KIDS side of the TV shows only what's tagged Kids.
+- **Collections.** A film series, or your own "Comedy", shows on the TV as one entry, in release order or your
+  own. PLAY suggests series; **New collection…** makes any you like, with search.
+- **HOME and KIDS.** The KIDS side of the TV shows only what's marked Kids: mark titles one by one, or pick many at
+  once with **+ Add to Kids…**.
 - **The TV finds the PC by itself.** No IP addresses to type (there's a fallback if your network blocks it).
 - **Resume** where you stopped, per TV, and search across everything.
 - **Five skins** (Blue, Ember, Neon, Violet, Crimson), shared with [Bigfoot](https://github.com/AARROWdev/bigfoot) and
   [Cratedig](https://github.com/AARROWdev/cratedig).
 
 ## Set up
+**Step by step, with pictures of what to press: [docs/INSTALL.md](docs/INSTALL.md).** In short:
+
 1. **On the PC:** install **PLAYSetup-&lt;version&gt;.exe** from the
    [latest release](https://github.com/AARROWdev/play/releases/latest) (Windows 10/11, 64-bit). PLAY starts with one
-   media folder, Videos\PLAY: **Add media** moves movies and shows there for you, and Settings can add more folders
-   (if your films are somewhere else already). Mark titles Kids in the library. PLAY lives in the tray and starts with Windows (from its first
-   start, for your Windows user; Settings switches it off), so the TVs can
-   always reach it.
-2. **On the Roku:** in PLAY's window click **Set up TVs** (also in the tray menu). It finds the Roku TVs on your
-   network and says what each one needs. Once per TV you turn on Roku's Developer Mode with the remote (the wizard
-   shows the button presses) and set a developer password; then one click puts PLAY on the TV, and it finds the PC
-   on its own. Open PLAY on the TV and pick HOME or KIDS. Run Set up TVs again any time to add a TV or update the
-   TV app. (A Roku holds one developer app at a time: installing PLAY replaces any other one; the wizard asks.)
+   media folder, `Videos\PLAY`; **Add media** moves movies and shows there. It lives in the tray and starts with
+   Windows, so the TVs can always reach it.
+2. **On each Roku TV, once:** turn on Developer Mode with the remote (**Home ×3, Up ×2, Right, Left, Right, Left,
+   Right**, then *Enable installer and restart* and set a developer password).
+3. **Back on the PC:** click **Set up TVs**, check the TV's IP address matches the one on the TV, and click
+   **Install on this TV**. PLAY opens on the TV and finds the PC by itself. Pick HOME or KIDS.
 
 The app isn't code-signed yet, so Windows may show "Windows protected your PC": click **More info**, then
 **Run anyway**. The installer lets PLAY through Windows Firewall on private networks only: if the TV can't find

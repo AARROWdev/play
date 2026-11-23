@@ -1319,6 +1319,7 @@ def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch)
     films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
     cid = win.lib.make_collection('Comedy', [films[0]['id'], films[1]['id']])
     win.lib.data['collections'][cid]['members'].append('ffffffffffffffff')   # a film on a drive that's away
+    monkeypatch.setattr(win.lib, '_incomplete', True)
     win.lib._incomplete = True                      # (that drive isn't read this time: the film is kept)
     d = pa.CollectionDialog(win, win.lib, cid)
     for _ in range(d.list.count()):
@@ -1332,12 +1333,15 @@ def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch)
 
 
 def test_episode_lines_dont_repeat_the_file_name():
-    base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'episode_last': None}
+    base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'episode_last': None,
+            'auto': {'title': 'Ann Droid S01E01'}}
     assert pa.title_line(dict(base, title='Ann Droid S01E01')) == 'Ann Droid · S1 E1'
     assert pa.title_line(dict(base, title='The Pool')) == 'Ann Droid · S1 E1 · The Pool'
     assert pa.title_line(dict(base, title='Ann Droid and the Pool')) == 'Ann Droid · S1 E1 · Ann Droid and the Pool'
-    two = dict(base, episode=3, episode_last=4)
+    two = dict(base, episode=3, episode_last=4, auto={'title': 'Ann Droid S01E03-E04'})
     assert pa.title_line(dict(two, title='Ann Droid S01E03-E04')) == 'Ann Droid · S1 E3-E4'
+    # a title stored from older numbers is still the automatic one if PLAY made it: shown only when typed
+    assert pa.title_line(dict(base, title='Ann Droid S01E01', auto={'title': 'Ann Droid S01E02'})) ==         'Ann Droid · S1 E1 · Ann Droid S01E01'
 
 
 def test_a_real_double_episode_shows_both_numbers(win, tmp_path):
@@ -1389,12 +1393,19 @@ def test_typing_in_the_year_box_saves_and_clearing_it_clears(win):
     win._detail_for([win.lib.by_id(film['id'])])
     _type_year(win, '1895')                          # an early film is a year
     assert win.lib.by_id(film['id'])['year'] == 1895
+    win._detail_for([win.lib.by_id(film['id'])])
+    _type_year(win, '19²')                           # (AZERTY's plain key: isdigit() but no int)
+    assert win.lib.by_id(film['id'])['year'] == 1895 and win.d_year.text() == '1895'
+    win._status()                                    # the note outlives the next status redraw
+    assert 'is not a year' in win.status.text()
     win.hide()
 
 
 def test_removing_every_film_isnt_saved_as_offline(win, monkeypatch):
     films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
     cid = win.lib.make_collection('Comedy', [i['id'] for i in films])
+    win.lib.data['collections'][cid]['members'].append('eeeeeeeeeeeeeeee')   # gone for good (all folders read)
+    assert not win.lib._incomplete
     d = pa.CollectionDialog(win, win.lib, cid)
     for _ in range(d.list.count()):
         d.list.item(0).setSelected(True)
@@ -1414,3 +1425,27 @@ def test_only_hidden_titles_left_says_so(win, monkeypatch):
     monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
     win.add_to_kids()
     assert 'hidden' in told[-1]
+
+
+# ------------------------------------------------------------------ f8c0536 review
+def test_a_year_typed_then_another_film_picked_is_saved(win):
+    from PySide6.QtTest import QTest
+    a, b = [i for i in win.lib._items if i['kind'] == 'movie' and not i.get('year')][:2]
+    win.show()
+    win._reselect([a['id']])
+    win._sel_changed()
+    win.d_year.setFocus()
+    QTest.keyClicks(win.d_year, '2001')              # typed, no Enter, no focus change ...
+    win._reselect([b['id']])                         # ... and another film picked
+    win._sel_changed()
+    assert win.lib.by_id(a['id'])['year'] == 2001 and not win.lib.by_id(b['id']).get('year')
+    win.hide()
+
+
+def test_add_to_kids_with_nothing_in_kids_and_all_hidden(win, monkeypatch):
+    for i in win.lib._items:
+        win.lib.set_item(i['id'], hidden=True, kids=False)
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    win.add_to_kids()
+    assert told[-1].startswith('Everything in the library is hidden')

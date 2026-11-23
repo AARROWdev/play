@@ -57,11 +57,14 @@ def clean(stem):
     return s
 
 
+FIRST_YEAR = 1870                                # the first films; a year before it isn't a release year
+
+
 def movie(stem):
     """(title, year or None) for a movie file name without extension."""
     s = clean(stem)
     latest = datetime.date.today().year + 1      # 'Blade Runner 2049' has no year
-    years = [y for y in _YEAR.finditer(s) if 1900 <= int(y.group(1)) <= latest]
+    years = [y for y in _YEAR.finditer(s) if FIRST_YEAR <= int(y.group(1)) <= latest]
     if years:
         y = years[-1]
         before = s[:y.start(1)].rstrip(' -([')

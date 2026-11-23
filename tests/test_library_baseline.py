@@ -1515,3 +1515,44 @@ def test_a_pending_link_into_another_media_folder_is_tagged(tmp_path, monkeypatc
     lb.items(0)
     assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
     assert lb.data['kids_pending'] == []
+
+
+def _pending_link(tmp_path, under=False):
+    movies = tmp_path / 'Movies'
+    make(str(movies / 'Animated'), 'Cars 2006.mkv', b'cars' * 50)
+    kids = tmp_path / 'Kids'
+    make(str(kids / 'Shelf'), 'Up 2009.mkv', b'up' * 50)
+    _junction((kids / 'Shelf' if under else kids) / 'Cartoons', movies / 'Animated')
+    store = tmp_path / 'store'
+    store.mkdir()
+    (store / 'library.json').write_text(json.dumps({'folders': [{'path': str(movies)}, {'path': str(kids)}]}),
+                                        encoding='utf-8')
+    lb = library.Library(str(store))
+    lb.data['kids_pending'] = [os.path.normcase(str(kids / 'Shelf' if under else kids / 'Cartoons'))]
+    lb._legacy_kids.clear()
+    return lb, movies
+
+
+def test_a_pending_link_waits_for_its_targets_files_to_settle(tmp_path, monkeypatch):
+    lb, movies = _pending_link(tmp_path)
+    monkeypatch.setattr(library, 'SETTLE', 0)
+    lb.items(0)
+    lb.data['kids_pending'] = lb.data['kids_pending'] or [os.path.normcase(str(tmp_path / 'Kids' / 'Cartoons'))]
+    make(str(movies / 'Animated'), 'Cars 2 2011.mkv', b'cars2' * 60)   # arrives in the target, still settling
+    monkeypatch.setattr(library, 'SETTLE', 3600)
+    lb.data['kids_pending'] = [os.path.normcase(str(tmp_path / 'Kids' / 'Cartoons'))]
+    lb.scan()
+    assert lb.data['kids_pending']                     # its target has a file still settling: later
+    monkeypatch.setattr(library, 'SETTLE', 0)
+    lb.scan()
+    assert lb.data['kids_pending'] == []
+    assert next(i for i in lb.current() if i['title'] == 'Cars 2')['kids']
+
+
+def test_a_link_under_a_pending_folder_tags_where_it_leads(tmp_path, monkeypatch):
+    lb, movies = _pending_link(tmp_path, under=True)
+    monkeypatch.setattr(library, 'SETTLE', 0)
+    lb.items(0)
+    assert lb.data['kids_pending'] == []
+    assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
+    assert next(i for i in lb.current() if i['title'] == 'Up')['kids']
