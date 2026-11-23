@@ -227,7 +227,8 @@ class Library:
         self._into = {}            # normcased root -> real folders of other media folders it reaches (links,
                                    # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
-        self._links = {}           # link (normcased) -> (its path, real target): online, or remembered from then
+        self._links = {}           # link (normcased) -> (its path, real target): seen online, said by an
+                                   # unplugged junction, or remembered from when a \\nas link was online
         self.missing = []          # media folders that aren't there any more (deleted or renamed)
         self._pool_cache = (None, None)   # (what it was built from, the kept-titles pool)
         self._live_roots = set()   # roots the last walk reached (their files win over kept ones)
@@ -367,11 +368,11 @@ class Library:
                     return pool
                 key = (tuple(sorted((r, hash(tuple(v))) for r, v in prev_raw.items())),
                        tuple((f['path'], real_of.get(r)) for f, r in zip(folders, roots)),
-                       tuple(sorted(links.items())), tuple(sorted(gone)))
+                       tuple(sorted(links.items())), tuple(sorted(gone)))   # every input the build reads
                 if self._pool_cache[0] == key:
                     pool = self._pool_cache[1]
                     return pool
-                anchors = [(real_of[r], f['path'], r) for f, r in zip(folders, roots) if r in real_of and r not in gone]
+                anchors = [(real_of[r], f['path'], r) for f, r in zip(folders, roots) if r in real_of]
                 for lk, (lp, t) in links.items():
                     ow = owner(lk)
                     if ow is not None:               # (a gone folder has no links: its walk didn't run)
@@ -425,6 +426,8 @@ class Library:
                 if lk not in links and ow is not None and ow not in gone and \
                         (ow not in reached or _under(lk, all_lost)):
                     links[lk] = v
+            # a file this scan read somewhere isn't also kept from before (that would list it as a copy)
+            live_fps = {e[0] for files, _ in results.values() for e in files}
             for root, (files, lost) in results.items():
                 # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
                 raw[root] = files
@@ -432,7 +435,8 @@ class Library:
                     have = {os.path.normcase(e[1]) for e in files}
                     lset, lpre = set(lost), tuple(x.rstrip(os.sep) + os.sep for x in lost)
                     raw[root] = files + [e for k, e in get_pool().get(root, {}).items()
-                                         if k not in have and (k in lset or k.startswith(lpre))]
+                                         if k not in have and e[0] not in live_fps
+                                         and (k in lset or k.startswith(lpre))]
             unreachable, missing = [], []
             for f, root in zip(folders, roots):
                 if root not in reached:
@@ -440,7 +444,8 @@ class Library:
                         raw[root] = []
                         missing.append(f['path'])
                         continue
-                    raw[root] = list(get_pool().get(root, {}).values())   # NAS asleep, drive not mounted yet
+                    raw[root] = [e for e in get_pool().get(root, {}).values()   # NAS asleep, not mounted yet
+                                 if e[0] not in live_fps]
                     unreachable.append(f['path'])
             live = {os.path.normcase(e[1]) for files in raw.values() for e in files}
             stale = [k for k in cache if k not in live and not _under(k, errored)
@@ -985,17 +990,21 @@ def _walk(root, skip_roots, sc, root_real_w=None):
                     real = os.path.normcase(real_w)
                 except OSError:
                     real = None
-                try:
-                    if real is None:
-                        raise OSError
-                    os.stat(path)
-                except OSError:                    # an unplugged target: keep its titles (they are keyed by path)
+                is_offline = real is None
+                if not is_offline:
+                    try:
+                        os.stat(path)
+                    except OSError:
+                        is_offline = True
+                if is_offline:                     # an unplugged target: keep its titles (they are keyed by path)
                     offline.append(path)
-                    # where it leads: as remembered from when it was online (offline, a link to \\nas or to a
-                    # mapped drive resolves differently), else what an unplugged junction still says
-                    remembered = sc.old_links.get(lkey)
-                    if remembered or real:
-                        links[lkey] = remembered or (path, real)
+                    # where it leads: an unplugged junction still says (and a re-pointed one says its new place);
+                    # a link to \\nas or to a mapped drive can't say offline (realpath fails or gives the link
+                    # itself), so it is remembered from when it was online
+                    if real is not None and real != lkey:
+                        links[lkey] = (path, real)
+                    elif lkey in sc.old_links:
+                        links[lkey] = sc.old_links[lkey]
                     continue
                 links[lkey] = (path, real)
                 if _under(real, other_roots):      # another media folder's own: it walks it, Kids flows through

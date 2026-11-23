@@ -1226,3 +1226,38 @@ def test_switching_a_folder_from_its_link_to_its_target_while_unplugged(tmp_path
     # the same real place, and the last scan's titles are the same.
     lb.set_folders([{'path': str(films)}])
     assert titles_now(lb) == ['Alien']
+
+
+
+# ------------------------------------------------------------------ 8f8e372 review
+def test_a_rename_doesnt_make_a_false_copy(tmp_path):
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    make(str(media / 'Kids' / 'Sub'), 'Up 2009.mkv')
+    _junction(media / 'Cartoons', media / 'Kids' / 'Sub')
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(media / 'Kids')}])
+    assert titles_now(lb) == ['Heat', 'Up']
+    os.rename(str(media / 'Kids'), str(media / 'Children'))
+    assert titles_now(lb) == ['Heat', 'Up']
+    up = next(i for i in lb.current() if i['title'] == 'Up')
+    assert not up.get('copies')
+
+
+def test_a_repointed_offline_junction_follows_its_new_target(tmp_path):
+    d, e = tmp_path / 'D' / 'Films', tmp_path / 'E' / 'Films'
+    make(str(d), 'Alien 1979.mkv')
+    make(str(e), 'Brazil 1985.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', d)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(d)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rmdir(str(media / 'Films'))
+    os.rename(str(e), str(tmp_path / 'E' / 'away'))         # E is unplugged ...
+    _junction(media / 'Films', e)                            # ... and Films now points there
+    lb.scan()
+    assert lb._links[os.path.normcase(str(media / 'Films'))][1] == os.path.normcase(str(e))
+    lb.set_folders([{'path': str(media)}])                   # D removed from Settings
+    assert titles_now(lb) == ['Heat']                        # Alien isn't kept under Films any more
