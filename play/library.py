@@ -553,15 +553,11 @@ class Library:
 
                     # where a link leads is a real path (\\nas\share\...); the media folders, what was lost and
                     # what is settling use the folders' own spellings (Z:\...): a target is put in those first
-                    real_roots = []
-                    for r in set(roots):
-                        try:
-                            real_roots.append((os.path.normcase(os.path.realpath(r)).rstrip(os.sep), r))
-                        except (OSError, ValueError):
-                            pass
+                    respell = sorted(((w.rstrip(os.sep), r.rstrip(os.sep)) for r, w in real_of.items()),
+                                     key=lambda x: -len(x[0]))
 
                     def spelled(t):
-                        for rr, r in real_roots:
+                        for rr, r in respell:
                             if t == rr or t.startswith(rr + os.sep):
                                 return r + t[len(rr):]
                         return t
@@ -592,9 +588,10 @@ class Library:
                         pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
                         # a pending link into another media folder: its files are listed under that folder's
                         # paths, so they're found by where the link leads
-                        targets = [t for p in done for v in (targets_of(p),) for t in v]
-                        targets += [v[1] for lk, v in links.items() if v[1] and any(lk == p or _under(lk, [p])
-                                                                                    for p in done)]
+                        # (both spellings: a file's real path, e[5], is matched against either)
+                        real_t = [v[1] for lk, v in links.items() if v[1] and any(lk == p or _under(lk, [p])
+                                                                                for p in done)]
+                        targets = real_t + [spelled(t) for t in real_t]
                         tpre = tuple(t.rstrip(os.sep) + os.sep for t in targets)
                         tagged = False
                         for files in raw.values():
@@ -713,7 +710,7 @@ class Library:
 
     def _digest(self):
         keys = ('id', 'path', 'title', 'year', 'kind', 'show', 'season', 'episode', 'kids', 'hidden', 'collection',
-                'problems', 'copies', 'size', 'format')
+                'problems', 'copies', 'size', 'format', 'typed_title')
         rows = [[i.get(k) for k in keys] for i in self._items]
         return hashlib.sha1(json.dumps([rows, self.data['collections'], self.data['dismissed']],
                                        sort_keys=True, default=str).encode()).hexdigest()
@@ -814,6 +811,8 @@ class Library:
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
             keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('auto_near_miss'))
+            # an episode's title follows its numbers unless typed: a typed one stays, whatever it says
+            keep = keep or (k == 'title' and cur is not None and cur['kind'] == 'episode' and bool(v))
             if cur is not None and cur['auto'].get(k) == v and not keep:
                 ov.pop(k, None)
             else:
@@ -842,7 +841,8 @@ class Library:
         while every media folder could be read is gone for good."""
         shown = set(shown)
         return [m for m in self.data['collections'].get(cid, {}).get('members', [])
-                if m not in shown and (self._by_id[m]['kind'] == 'movie' if m in self._by_id else self._incomplete)]
+                if m not in shown and ((self._by_id.get(m) or {}).get('kind') == 'movie'
+                                       if self._by_id.get(m) else self._incomplete)]
 
     def update_collection(self, cid, name=None, order=None, members=None, shown=None):
         """members, when given, is the new order of the films the dialog showed (shown: the ids it listed when it

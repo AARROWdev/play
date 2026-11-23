@@ -1556,3 +1556,50 @@ def test_a_link_under_a_pending_folder_tags_where_it_leads(tmp_path, monkeypatch
     assert lb.data['kids_pending'] == []
     assert next(i for i in lb.current() if i['title'] == 'Cars')['kids']
     assert next(i for i in lb.current() if i['title'] == 'Up')['kids']
+
+
+
+def test_years_from_1870_read_as_years():
+    assert names.movie('The Kiss (1896)') == ('The Kiss', 1896)
+    assert names.movie('A Trip to the Moon 1902') == ('A Trip to the Moon', 1902)
+    assert names.movie('Film 1850') == ('Film 1850', None)
+
+
+def _free_letter():
+    import string
+    used = {d[0].upper() for d in os.popen('wmic logicaldisk get name 2>nul').read().split() if d[1:2] == ':'}
+    for c in reversed(string.ascii_uppercase[3:]):
+        if c not in used and not os.path.exists(c + ':' + os.sep):
+            return c
+    pytest.skip('no free drive letter')
+
+
+def test_a_pending_link_into_a_drive_root_media_folder_waits_for_settling(tmp_path, monkeypatch):
+    movies = tmp_path / 'Movies'
+    make(str(movies / 'Animated'), 'Cars 2006.mkv', b'cars' * 50)
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    _junction(kids / 'Cartoons', movies / 'Animated')
+    letter = _free_letter()
+    if subprocess.run(['subst', letter + ':', str(movies)], capture_output=True).returncode:
+        pytest.skip('subst unavailable')
+    try:
+        root = letter + ':' + os.sep                       # the media folder is a whole drive (spelled X:\)
+        store = tmp_path / 'store'
+        store.mkdir()
+        (store / 'library.json').write_text(json.dumps({'folders': [{'path': root}, {'path': str(kids)}]}),
+                                            encoding='utf-8')
+        lb = library.Library(str(store))
+        monkeypatch.setattr(library, 'SETTLE', 0)
+        lb.items(0)
+        make(str(movies / 'Animated'), 'Cars 2 2011.mkv', b'cars2' * 60)   # arrives where the link leads
+        lb.data['kids_pending'] = [os.path.normcase(str(kids / 'Cartoons'))]
+        monkeypatch.setattr(library, 'SETTLE', 3600)
+        lb.scan()
+        assert lb.data['kids_pending']                # still settling under X:\Animated: later
+        monkeypatch.setattr(library, 'SETTLE', 0)
+        lb.scan()
+        assert lb.data['kids_pending'] == []
+        assert next(i for i in lb.current() if i['title'] == 'Cars 2')['kids']
+    finally:
+        subprocess.run(['subst', letter + ':', '/d'], capture_output=True)

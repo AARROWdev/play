@@ -1498,3 +1498,48 @@ def test_a_year_never_lands_on_an_episode(win):
     win.d_year.setText('1999')
     win._save_year(ep['id'])
     assert not win.lib.by_id(ep['id']).get('year')
+
+
+# ------------------------------------------------------------------ 2593796 review
+def _row_of(w, title):
+    for r in range(w.model.rowCount()):
+        idx = w.model.index(r, 0)
+        if idx.data(pa.KIND) == 'item' and w.lib.by_id(idx.data(pa.ID))['title'] == title:
+            return idx
+    raise AssertionError(title)
+
+
+# Toy Shelf renamed Aardvark moves to the top: every row above it shifts down one (a redraw before the click
+# lands would put another film under the mouse)
+@pytest.mark.parametrize('film, box, keys', [('Toy Shelf', 'd_title', 'Aardvark'), ('Conor', 'd_year', '1999')])
+def test_typing_then_clicking_another_film_selects_that_film(win, film, box, keys):
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+    win.resize(1000, 600)
+    win.show()
+    win.activateWindow()
+    if not QTest.qWaitForWindowActive(win):          # a focus change needs an active window
+        pytest.skip('no active window on this platform')
+    pick(win, film)
+    conor = win.sel[0]['id']
+    edit = getattr(win, box)
+    edit.setFocus()
+    edit.selectAll()
+    QTest.keyClicks(edit, keys)                       # no Enter: the click below ends the typing
+    target = _row_of(win, 'Jungle Park III')
+    want = target.data(pa.ID)
+    QTest.mouseClick(win.view.viewport(), _Qt.LeftButton, pos=win.view.visualRect(target).center())
+    for _ in range(3):
+        QApplication.processEvents()
+    assert win.selected_ids() == [want]               # the film clicked, not whatever slid under the mouse
+    saved = win.lib.by_id(conor)
+    assert (saved['title'] == 'Aardvark') if box == 'd_title' else (saved['year'] == 1999)
+    win.hide()
+
+
+def test_nothing_selected_then_the_same_film_shows_its_title(win):
+    pick(win, 'Conor')
+    win.view.clearSelection()
+    win._sel_changed()
+    pick(win, 'Conor')
+    assert win.d_title.text() == 'Conor' and win.d_year.text() == '1982'

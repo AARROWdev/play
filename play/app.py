@@ -980,6 +980,17 @@ class Window(QMainWindow):
     def _sel_changed(self, *_):
         if not self.lib._scanned:
             return self._detail_for([])
+        ids = self.selected_ids()
+        now = ids[0] if len(ids) == 1 else None
+        saved = False
+        if self._year_for and self._year_for != now and self.d_year.isModified():
+            saved = self._save_year(self._year_for, redraw=False) or saved   # typed, then another film picked
+            self.d_year.setModified(False)
+        if self._title_for and self._title_for != now and self.d_title.isModified():
+            saved = self._save_title(self._title_for) or saved
+            self.d_title.setModified(False)
+        if saved:
+            QTimer.singleShot(0, self.refresh)           # once, after this click is done (rows keep still now)
         self._detail_for([self.lib.by_id(i) for i in self.selected_ids()])
 
     def _ep_edited(self, *_):
@@ -1000,22 +1011,14 @@ class Window(QMainWindow):
             self.ep_box.setVisible(len(its) == 1 and its[0]['kind'] == 'episode')
         if not on:                                      # (the panel is hidden)
             self.d_title.clear()
+            self.d_year.clear()
+            self.d_title.setModified(False)
+            self.d_year.setModified(False)
+            self._title_for = self._year_for = None
             self.d_col.clear()
             return
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
         self.d_title.setEnabled(bool(one))
-        if self._year_for and self.d_year.isModified() and not (one and one['id'] == self._year_for):
-            fid, self._year_for = self._year_for, None        # typed for a film that's no longer the one shown
-            self.d_year.setModified(False)
-            self._save_year(fid, redraw=False)
-        if self._title_for and self.d_title.isModified() and not (one and one['id'] == self._title_for):
-            fid, self._title_for = self._title_for, None      # the same for a title typed without Enter
-            self.d_title.setModified(False)
-            t = self.d_title.text().strip()
-            old = self.lib.by_id(fid)
-            if t and old is not None and t != old['title']:
-                self.lib.set_item(fid, title=t)
-                QTimer.singleShot(0, self.refresh)
         self.d_year.setEnabled(bool(one) and one['kind'] == 'movie')
         if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
             self.d_year.setText(str(one.get('year') or '') if one and one['kind'] == 'movie' else '')
@@ -1067,7 +1070,7 @@ class Window(QMainWindow):
 
     def _save_year(self, fid, redraw=True):
         """The Year box's text for the film fid: a year saves, empty clears it, anything else is put back.
-        redraw False: called while the panel is being drawn (the redraw comes after)."""
+        True when saved. redraw False: the caller redraws."""
         text = self.d_year.text().strip()
         film = self.lib.by_id(fid)
         if film is None or film['kind'] != 'movie':
@@ -1081,20 +1084,24 @@ class Window(QMainWindow):
         elif year != film.get('year'):                         # (empty: no year)
             self.lib.set_item(fid, year=year)
             if redraw:
-                self.refresh()
-            else:
-                QTimer.singleShot(0, self.refresh)
+                QTimer.singleShot(0, self.refresh)  # (after the event that ended the typing: a click lands first)
+            return True
+        return False
+
+    def _save_title(self, fid):
+        """The title box's text for fid, if it's a change. True when saved (the caller redraws)."""
+        t = self.d_title.text().strip()
+        old = self.lib.by_id(fid)
+        if t and old is not None and t != old['title']:
+            self.lib.set_item(fid, title=t)
+            return True
+        return False
 
     def _title_done(self):
-        changed = False
-        if len(self.sel) == 1:
-            t = self.d_title.text().strip()
-            if t and t != self.sel[0]['title']:
-                self.lib.set_item(self.sel[0]['id'], title=t)
-                changed = True
+        changed = len(self.sel) == 1 and self._save_title(self.sel[0]['id'])
         self.d_title.setModified(False)          # Enter, changed or not: the box follows the title again
         if changed:
-            self.refresh()
+            QTimer.singleShot(0, self.refresh)    # (after the event that ended the typing: a click lands first)
 
     def _set_kind(self, kind):
         if kind == 'movie':
