@@ -201,11 +201,7 @@ class _Deadline:
         self.uploaded = False                  # the latest request: a body, with a password, went out in full
 
     def left(self):
-        """Seconds left, for this call and any it runs inside (the soonest end counts)."""
-        t = self.end - time.monotonic()
-        if self.outer is not None:
-            t = min(t, self.outer.left())
-        return max(0.05, t)
+        return max(0.05, self.end - time.monotonic())   # (within() starts an inner call no later than the outer)
 
     def over(self):
         """Time is up for this call, or for a call it runs inside (the watchdog may not have said so yet)."""

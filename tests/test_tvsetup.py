@@ -1273,12 +1273,6 @@ def test_no_connection_once_the_outer_call_is_out_of_time(monkeypatch):
     assert made == [] and inner.cut
 
 
-def test_time_left_counts_the_outer_call():
-    outer = roku._Deadline(0.5)
-    inner = roku._Deadline(60, outer)
-    assert inner.left() <= 0.5
-
-
 
 # ------------------------------------------------------------------ bff131d review
 def test_a_password_problem_doesnt_stick_to_later_failures(qapp, tmp_path, monkeypatch):
@@ -1321,3 +1315,64 @@ def test_an_unusable_password_doesnt_forget_the_stored_one(qapp, tmp_path, monke
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
     QApplication.processEvents()
     assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:kept'}
+
+
+
+# ------------------------------------------------------------------ bae4a45 review
+def test_no_connection_once_the_outer_calls_own_clock_has_run_out(monkeypatch):
+    made = []
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'connect', lambda self: made.append(1))
+    outer = roku._Deadline(60)
+    outer.end = roku.time.monotonic() - 1           # past its end, though the watchdog hasn't said so
+    inner = roku._Deadline(60, outer)
+    monkeypatch.setattr(roku._current, 'deadline', inner, raising=False)
+    with pytest.raises(socket.timeout):
+        roku._Connection('127.0.0.1', 9, timeout=5).connect()
+    assert made == [] and not outer.expired
+
+
+def _unusable_dialog(qapp, tmp_path, monkeypatch):
+    class Unusable(FakeNet):
+        def install(self, ip, pw, data):
+            raise roku.UnusablePassword('A Roku developer password uses only plain letters, digits and symbols.')
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=Unusable({'10.0.0.6': {
+        'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', '')}}))
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    return d, lib
+
+
+def test_an_unusable_stored_password_is_forgotten(qapp, tmp_path, monkeypatch):
+    d, lib = _unusable_dialog(qapp, tmp_path, monkeypatch)
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:sécret'})   # (somehow) a stored one
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('', False))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert lib.data['tv_passwords'] == {}
+
+
+def test_an_unusable_password_while_closed_is_asked_on_reopen(qapp, tmp_path, monkeypatch):
+    d, lib = _unusable_dialog(qapp, tmp_path, monkeypatch)
+    prompts = []
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: prompts.append(a[2]) or ('sécret', True))
+    select(d, '10.0.0.6')
+    d.release()                                     # closed before the result is in
+    d._start_install('10.0.0.6', 'sécret')
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    QApplication.processEvents()
+    assert prompts == [] and d.tv['10.0.0.6'].get('ask_again')
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: prompts.append(a[2]) or ('', False))
+    d.reopen()
+    wait_for(lambda: prompts)
+    assert 'plain letters' in prompts[0]
+
+
+def test_a_re_ask_the_dialog_closed_before_is_kept(qapp, tmp_path, monkeypatch):
+    d, lib = _unusable_dialog(qapp, tmp_path, monkeypatch)
+    d.tv['10.0.0.6'].update(status=tvsetup.FAILED, msg='x', pw_problem=True)
+    d.closing = True                                # closed between the result and the scheduled re-ask
+    d._retry('10.0.0.6')
+    assert d.tv['10.0.0.6'].get('ask_again')

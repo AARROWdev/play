@@ -79,6 +79,7 @@ class TvSetupDialog(QDialog):
         self.resize(720, 440)
         self.tv = {}                                   # ip -> {'status', 'info', 'app', 'msg'}
         self.gen = {}                                  # ip -> the latest check or install started for it
+        self.from_store = {}                           # ip -> the password being tried came from storage
         self.searching = False
         self.active = 0                                # workers still running (the dialog outlives them)
         self.closing = False
@@ -215,7 +216,9 @@ class TvSetupDialog(QDialog):
             return                                      # a check or install that something newer replaced
         wrong = st.get('wrong')                         # the TV refused the password: forget it, ask again
         ask = wrong or st.get('ask_pw')                 # ask again (also for one no TV was asked about)
-        if 'pw' in st or wrong:
+        if st.get('ask_pw') and self.from_store.get(ip):   # an unusable one that was stored: forget it too
+            st = dict(st, wrong=True)
+        if 'pw' in st or st.get('wrong'):
             _after_install(self, ip, st)
         st = {k: v for k, v in st.items() if k not in ('pw', 'wrong', 'ask_pw', 'install', 'gen')}
         cur = self.tv.setdefault(ip, {'status': CHECKING, 'info': None, 'app': None, 'msg': ''})
@@ -228,7 +231,10 @@ class TvSetupDialog(QDialog):
             QTimer.singleShot(0, lambda: self._retry(ip))
 
     def _retry(self, ip):
-        if self.closing or self.tv.get(ip, {}).get('status') != FAILED:
+        if self.tv.get(ip, {}).get('status') != FAILED:
+            return
+        if self.closing:                                # closed just now: ask when it's opened again
+            self.tv[ip]['ask_again'] = True
             return
         pw = self._password(ip, retry=True, why=self.tv[ip].get('msg') if self.tv[ip].get('pw_problem') else None)
         if pw is not None:
@@ -323,9 +329,11 @@ class TvSetupDialog(QDialog):
     def _password(self, ip, retry=False, why=None):
         key = self._key(ip)
         stored = self.lib.data['tv_passwords'].get(key) if key else None
+        self.from_store[ip] = False
         if stored and not retry:
             pw = self.net.unprotect(stored)
             if pw:
+                self.from_store[ip] = True
                 return pw
         prompt = ((why + ' ') if why else 'That password didn\'t work. ' if retry else '') + \
             'The developer password you set on this TV when you turned on Developer Mode:'
@@ -351,7 +359,7 @@ class TvSetupDialog(QDialog):
         self._start_install(ip, pw)
 
     def _start_install(self, ip, pw):
-        self.tv[ip].update(status=INSTALLING, msg='', pw_problem=False)
+        self.tv[ip].update(status=INSTALLING, msg='')
         self._row(ip)
         self._details()
         self._run(self._install_worker, ip, pw, self._next(ip))
