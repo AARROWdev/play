@@ -886,3 +886,80 @@ def test_new_collection_cancelled_makes_nothing(win, monkeypatch):
     monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('', False))
     win.new_collection()
     assert not win.lib.data['collections']
+
+
+# ------------------------------------------------------------------ one default folder, Add media, the panel
+def test_a_new_play_starts_with_one_default_folder(win, monkeypatch, tmp_path):
+    monkeypatch.setattr(library, 'default_folder_path', lambda: str(tmp_path / 'Videos' / 'PLAY'))
+    win.lib.data['folders'] = []
+    d = pa.SettingsDialog(win, win.lib, first_run=True)
+    assert d._paths() == [str(tmp_path / 'Videos' / 'PLAY')]
+    assert 'default' in d.folders.item(0).text()
+    monkeypatch.setattr(pa.SettingsDialog, 'exec', lambda self: QDialog.Accepted)
+    monkeypatch.setattr(pa, 'SettingsDialog', lambda *a, **k: d)
+    win.open_settings(first_run=True)
+    assert os.path.isdir(str(tmp_path / 'Videos' / 'PLAY'))                   # made when saved
+    assert [f['path'] for f in win.lib.folders] == [str(tmp_path / 'Videos' / 'PLAY')]
+
+
+def test_more_folders_and_which_is_default(win, tmp_path, monkeypatch):
+    d = pa.SettingsDialog(win, win.lib)
+    first = d._paths()
+    extra = tmp_path / 'More'
+    extra.mkdir()
+    monkeypatch.setattr(pa.QFileDialog, 'getExistingDirectory', lambda *a: str(extra))
+    d._add()
+    assert d._paths() == first + [str(extra)] and 'default' not in d.folders.item(len(first)).text()
+    d.folders.setCurrentRow(len(first))
+    d._make_default()
+    assert d._paths()[0] == str(extra) and 'default' in d.folders.item(0).text()
+    fs = d.values()[0]
+    assert fs[0] == {'path': str(extra), 'kids': False}                       # a new folder is never a Kids one
+    kids_before = {f['path']: f['kids'] for f in win.lib.folders}
+    assert all(f['kids'] == kids_before[f['path']] for f in fs[1:])         # older ones keep what they were
+
+
+def test_add_media_moves_the_files_into_the_default_folder(win, tmp_path, monkeypatch):
+    downloads = tmp_path / 'Downloads'
+    make(str(downloads), 'Up 2009.mkv', b'up' * 500)
+    make(str(downloads), 'Heat 1995.mkv', b'other heat' * 500)
+    default = win.lib.default_folder
+    make(default, 'Heat 1995.mkv', b'already here' * 100)                   # a name that's taken
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames',
+                        lambda *a, **k: ([str(downloads / 'Up 2009.mkv'), str(downloads / 'Heat 1995.mkv')], ''))
+
+    def yes_with_kids(box):
+        box.checkBox().setChecked(True)
+        return pa.QMessageBox.Yes
+    monkeypatch.setattr(pa.QMessageBox, 'exec', yes_with_kids)
+    win.add_media()
+    assert not list(downloads.iterdir())                                     # moved, not copied
+    assert os.path.exists(os.path.join(default, 'Up 2009.mkv'))
+    assert os.path.exists(os.path.join(default, 'Heat 1995 (2).mkv'))        # nothing overwritten
+    up = library.fingerprint(os.path.join(default, 'Up 2009.mkv'), 1000)
+    assert win.lib.data['items'][up]['kids'] is True
+
+
+def test_add_media_needs_a_folder_and_can_be_cancelled(win, tmp_path, monkeypatch):
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a))
+    folders = win.lib.data['folders']
+    win.lib.data['folders'] = []
+    win.add_media()
+    assert told
+    win.lib.data['folders'] = folders
+    src = tmp_path / 'x' / 'Up 2009.mkv'
+    make(str(src.parent), src.name)
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(src)], ''))
+    monkeypatch.setattr(pa.QMessageBox, 'exec', lambda box: pa.QMessageBox.No)
+    win.add_media()
+    assert src.exists()                                                      # not moved
+
+
+def test_the_panel_on_the_right_shows_only_with_a_selection(win):
+    win.show()
+    win._detail_for([])
+    assert not win.detail_pane.isVisible()
+    win._detail_for([win.lib._items[0]])
+    assert win.detail_pane.isVisible()
+    win.hide()

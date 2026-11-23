@@ -10,11 +10,11 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPixma
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
+                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog, QPushButton,
                                QSpinBox, QSplitter, QSystemTrayIcon, QTreeView, QVBoxLayout, QWidget)
 
 import suite_style
-from . import instance, library, names, server, skins
+from . import instance, library, media, names, server, skins
 from .names import plural
 
 APP = 'PLAY'
@@ -59,6 +59,38 @@ def run_dialog(d, *args):
         return d.exec(*args)
     finally:
         d.deleteLater()
+
+
+def run_with_progress(parent, title, job, total):
+    """job(progress) in a worker thread, with a progress window meanwhile (the window stays responsive).
+    progress(i, total, name) updates it. Returns job's result."""
+    import threading
+    dlg = QProgressDialog(title, None, 0, total, parent)
+    dlg.setWindowTitle(title)
+    dlg.setMinimumDuration(0)
+    dlg.setWindowModality(Qt.WindowModal)
+    box, state = {}, {'i': 0, 'name': ''}
+
+    def progress(i, n, name):
+        state.update(i=i, name=name)
+
+    def run():
+        try:
+            box['value'] = job(progress)
+        except BaseException as e:                 # handed back below
+            box['error'] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    while t.is_alive():
+        dlg.setValue(state['i'])
+        dlg.setLabelText(f'{title}: {state["name"]}')
+        QApplication.processEvents()
+        t.join(0.05)
+    dlg.setValue(total)
+    dlg.deleteLater()
+    if 'error' in box:
+        raise box['error']
+    return box['value']
 
 
 def human_size(n):
@@ -144,28 +176,32 @@ class SettingsDialog(QDialog):
         self.lib = lib
         v = QVBoxLayout(self)
         if first_run:
-            hi = QLabel('<b>Welcome to PLAY.</b> Add the folder (or folders) where your movies and shows are. '
-                        'PLAY only reads them: files are never moved, renamed or changed.')
+            hi = QLabel('<b>Welcome to PLAY.</b> Your movies and shows go in the folder below (Add media puts '
+                        'them there for you). If they are somewhere else already, add that folder too.')
             hi.setWordWrap(True)
             v.addWidget(hi)
-        note = QLabel('Media folders. Tick Kids for a folder whose files should start out tagged Kids. The tag is '
-                      'given once, when PLAY first sees a file there; unticking the folder later leaves existing '
-                      'tags alone (change them in the library).')
+        note = QLabel('Media folders. The first one is the default: Add media moves files there. Kids, movies and '
+                      'shows are marked in the library, not by folder.')
         note.setWordWrap(True)
         v.addWidget(note)
         self.folders = QListWidget()
         self.folders.setSelectionMode(QAbstractItemView.SingleSelection)
-        for f in lib.folders:
-            self._add_row(f['path'], f.get('kids'))
+        self.kids_was = {os.path.normcase(f['path']): f.get('kids') is True for f in lib.folders}
+        paths = [f['path'] for f in lib.folders] or ([library.default_folder_path()] if first_run else [])
+        for p in paths:
+            self.folders.addItem(p)
+        self._mark_default()
         v.addWidget(self.folders)
         row = QHBoxLayout()
-        add, rem = QPushButton('Add folder…'), QPushButton('Remove')
-        add.setObjectName('chip')
-        rem.setObjectName('chip')
+        add, rem, dft = QPushButton('Add folder…'), QPushButton('Remove'), QPushButton('Make default')
+        for b in (add, rem, dft):
+            b.setObjectName('chip')
         add.clicked.connect(self._add)
-        rem.clicked.connect(lambda: self.folders.takeItem(self.folders.currentRow()))
+        rem.clicked.connect(self._remove)
+        dft.clicked.connect(self._make_default)
         row.addWidget(add)
         row.addWidget(rem)
+        row.addWidget(dft)
         row.addStretch()
         v.addLayout(row)
         grid = QHBoxLayout()
@@ -201,21 +237,37 @@ class SettingsDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
-    def _add_row(self, path, kids=False):
-        it = QListWidgetItem(path)
-        it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-        it.setCheckState(Qt.Checked if kids else Qt.Unchecked)
-        it.setToolTip('Checked = Kids folder')
-        self.folders.addItem(it)
+    def _paths(self):
+        return [self.folders.item(i).data(Qt.UserRole) for i in range(self.folders.count())]
+
+    def _mark_default(self):
+        """The first folder is the default: it says so."""
+        for i in range(self.folders.count()):
+            it = self.folders.item(i)
+            path = it.data(Qt.UserRole) or it.text()
+            it.setData(Qt.UserRole, path)
+            it.setText(f'{path}   (default: new media goes here)' if i == 0 else path)
 
     def _add(self):
         d = QFileDialog.getExistingDirectory(self, 'Add a media folder')
         if d:
-            self._add_row(os.path.normpath(d))
+            self.folders.addItem(os.path.normpath(d))
+            self._mark_default()
+
+    def _remove(self):
+        self.folders.takeItem(self.folders.currentRow())
+        self._mark_default()
+
+    def _make_default(self):
+        row = self.folders.currentRow()
+        if row > 0:
+            self.folders.insertItem(0, self.folders.takeItem(row))
+            self.folders.setCurrentRow(0)
+            self._mark_default()
 
     def values(self):
-        fs = [{'path': self.folders.item(i).text(), 'kids': self.folders.item(i).checkState() == Qt.Checked}
-              for i in range(self.folders.count())]
+        # a folder that was a Kids folder (older settings) stays one; new folders aren't
+        fs = [{'path': p, 'kids': self.kids_was.get(os.path.normcase(p), False)} for p in self._paths()]
         return fs, self.port.value(), self.skin.currentText(), self.auto.isChecked()
 
 
@@ -323,7 +375,7 @@ class Window(QMainWindow):
         self.status = QLabel()
         self.status.setTextFormat(Qt.PlainText)      # parts of it come from the network (a refused Host name)
         self.statusBar().addWidget(self.status, 1)
-        self.status_note = QLabel('Files are never renamed or moved')
+        self.status_note = QLabel('Files are never renamed or changed')
         self.statusBar().addPermanentWidget(self.status_note)
         scanner.changed.connect(self._changed)
         self.ticks = 0
@@ -368,6 +420,11 @@ class Window(QMainWindow):
         self.heading.setObjectName('heading')
         head.addWidget(self.heading)
         head.addStretch()
+        am = QPushButton('Add media…')                  # pick files: they're moved into the default folder
+        am.setObjectName('chip')
+        am.setToolTip('Pick movies or episodes: PLAY moves them into your default media folder')
+        am.clicked.connect(self.add_media)
+        head.addWidget(am)
         nc = QPushButton('New collection…')            # always here: any group of films, named as you like
         nc.setObjectName('chip')
         nc.setToolTip('Select the films, then click to group them under one name on the TV (like "Comedy")')
@@ -415,6 +472,7 @@ class Window(QMainWindow):
     def _detail(self):
         w = QWidget()
         w.setObjectName('detail')
+        self.detail_pane = w
         w.setMinimumWidth(280)
         v = QVBoxLayout(w)
         self.d_heading = QLabel('Nothing selected')
@@ -734,6 +792,7 @@ class Window(QMainWindow):
         its = [i for i in its if i]
         self.sel = its
         on = bool(its)
+        self.detail_pane.setVisible(on)                # nothing selected: no panel at all
         for wdg in (self.d_title, self.d_movie, self.d_show, self.d_kids, self.d_hide, self.d_col, self.d_open):
             wdg.setEnabled(on)
         one = its[0] if len(its) == 1 else None
@@ -850,6 +909,39 @@ class Window(QMainWindow):
             self.lib.dismiss(self.suggestion['key'])
             self.refresh()
 
+    def add_media(self):
+        """Pick video files and move them into the default folder (optionally marked Kids)."""
+        folder = self.lib.default_folder
+        if not folder:
+            QMessageBox.information(self, 'Add media', 'First add a media folder in Settings.')
+            return
+        exts = ' '.join(f'*{e}' for e in sorted(names.VIDEO_EXTS))
+        paths, _ = QFileDialog.getOpenFileNames(self, 'Add media', '', f'Videos ({exts})')
+        if not paths:
+            return
+        paths = [os.path.normpath(p) for p in paths]
+        box = QMessageBox(QMessageBox.Question, 'Add media',
+                          f'Move {plural(len(paths), "file")} into {folder}?', QMessageBox.Yes | QMessageBox.No, self)
+        box.setTextFormat(Qt.PlainText)
+        box.setInformativeText('They are moved, not copied: they leave the folder they are in now.')
+        kids = QCheckBox('Mark them Kids')
+        box.setCheckBox(kids)
+        try:
+            if box.exec() != QMessageBox.Yes:
+                return
+            kids = kids.isChecked()
+        finally:
+            box.deleteLater()
+        os.makedirs(folder, exist_ok=True)
+        moved, failed = run_with_progress(self, 'Adding media', lambda progress:
+                                          media.move_files(paths, folder, progress), len(paths))
+        if kids and moved:
+            self.lib.mark_kids([fp for _, fp in moved])
+        self.scanner.kick()
+        if failed:
+            QMessageBox.warning(self, 'Add media', 'These could not be moved:\n' +
+                                '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
+
     def new_collection(self):
         """A collection of the selected films, named by you. Shows on the TV as one entry."""
         films = [i for i in self.sel if i['kind'] == 'movie']
@@ -930,6 +1022,11 @@ class Window(QMainWindow):
             d.deleteLater()
         if not accepted:
             return
+        if folders and not os.path.isdir(folders[0]['path']):
+            try:                                       # the default folder (Videos\\PLAY at first): make it
+                os.makedirs(folders[0]['path'], exist_ok=True)
+            except OSError as e:
+                QMessageBox.warning(self, 'PLAY', f'Could not create {folders[0]["path"]}: {e.strerror or e}')
         self.lib.set_folders(folders)
         self.lib.set_value('skin', skin)
         apply_skin(QApplication.instance(), skin)

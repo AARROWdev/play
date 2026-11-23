@@ -38,6 +38,11 @@ def default_store_dir():
     return os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'PLAY')
 
 
+def default_folder_path():
+    """The media folder a new PLAY starts with: Videos\\PLAY in the user's profile."""
+    return os.path.join(os.path.expanduser('~'), 'Videos', 'PLAY')
+
+
 def fingerprint(path, size):
     """16 hex chars from the size and the first and last 64 KB. Same file anywhere = same id."""
     h = hashlib.sha1(str(size).encode())
@@ -658,6 +663,19 @@ class Library:
         return it
 
     # ------------------------------------------------------------------ edits
+    @property
+    def default_folder(self):
+        """Where added media goes: the first media folder (None when there are none)."""
+        return self.data['folders'][0]['path'] if self.data['folders'] else None
+
+    def mark_kids(self, fps):
+        """Tag these files Kids now, whether or not a scan has seen them yet (added media)."""
+        with self.lock:
+            for fp in fps:
+                self.data['items'].setdefault(fp, {})['kids'] = True
+            self._rebuild()
+        self.save()
+
     def set_item(self, fp, **fields):
         """Override what PLAY read from the name. A value equal to the automatic one removes the override."""
         self.set_items([fp], **fields)

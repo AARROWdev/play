@@ -20,8 +20,9 @@ the files straight from your drives to the TVs in your house.
 
 ## Set up
 1. **On the PC:** install **PLAYSetup-&lt;version&gt;.exe** from the
-   [latest release](https://github.com/AARROWdev/play/releases/latest) (Windows 10/11, 64-bit). On first run, add
-   the folder or folders your movies and shows are in. PLAY lives in the tray and starts with Windows (from its first
+   [latest release](https://github.com/AARROWdev/play/releases/latest) (Windows 10/11, 64-bit). PLAY starts with one
+   media folder, Videos\PLAY: **Add media** moves movies and shows there for you, and Settings can add more folders
+   (if your films are somewhere else already). Mark titles Kids in the library. PLAY lives in the tray and starts with Windows (from its first
    start, for your Windows user; Settings switches it off), so the TVs can
    always reach it.
 2. **On the Roku:** in PLAY's window click **Set up TVs** (also in the tray menu). It finds the Roku TVs on your
