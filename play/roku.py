@@ -297,7 +297,7 @@ class _Connection(http.client.HTTPConnection):
         try:
             super().connect()
         except (TimeoutError, socket.timeout):
-            if deadline is not None and deadline.expired:
+            if deadline is not None and (deadline.expired or time.monotonic() >= deadline.end):
                 deadline.cut = True            # it was the time limit that ended the connect
             raise
         if deadline is not None:
@@ -398,27 +398,18 @@ class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
     app). The one exception is a "stale" nonce (the TV wants a fresh one, the password was fine): one retry."""
 
     def http_error_401(self, req, fp, code, msg, headers):
-        if not (headers.get('WWW-Authenticate') or '').strip().lower().startswith('digest '):
-            raise Unrecognised(UNRECOGNISED)   # NTLM, Basic, a blank header: not what a Roku asks
-        if req.unredirected_hdrs.get('Authorization'):
-            stale = _challenge(headers.get('WWW-Authenticate')).get('stale', '').lower() == 'true'
-            if not stale or getattr(req, '_play_stale_retry', False):
-                raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+        chal = _challenge(headers.get('WWW-Authenticate'))    # parsed once, here
+        if req.unredirected_hdrs.get('Authorization'):          # the password went: this is the TV's answer to it
+            if chal.get('stale', '').lower() != 'true' or getattr(req, '_play_stale_retry', False):
+                raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)   # refused
             req._play_stale_retry = True
-        return super().http_error_401(req, fp, code, msg, headers)
-
-    def retry_http_digest_auth(self, req, auth):
-        chal = _challenge(auth)
-        if not chal:
+        elif not chal:                                          # asked, but not as a Roku asks (NTLM, Basic, blank)
             raise Unrecognised(UNRECOGNISED)
         value = self.get_authorization(req, chal)
         if not value:
             return None
-        value = f'Digest {value}'
-        if req.headers.get(self.auth_header) == value:
-            return None
-        req.add_unredirected_header(self.auth_header, value)
-        return self.parent.open(req, timeout=req.timeout)   # (its own errors are its own)
+        req.add_unredirected_header(self.auth_header, f'Digest {value}')
+        return self.parent.open(req, timeout=req.timeout)       # (its own errors are its own)
 
     def get_authorization(self, req, chal):
         try:

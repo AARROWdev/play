@@ -60,6 +60,9 @@ class FakeInstaller(BaseHTTPRequestHandler):
     attempts = 0
     uploads = 0                   # POSTs that carried the app
     stale_once = False            # answer the first good password with "stale nonce" (a fresh one is wanted)
+    stale_always = False          # a TV that always says "stale"
+    preflight_404 = False         # no challenge up front (the upload itself gets it)
+    refuse_bare = False           # a refusal of the password without any WWW-Authenticate
     nonce = 'n0nce'
     reply = b'<script>var m = [{"text":"Application Received: 1 bytes stored."},{"text":"Install Success."}]</script>'
 
@@ -74,6 +77,11 @@ class FakeInstaller(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if FakeInstaller.preflight_404:
+            self.send_response(404)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         self._challenge()
 
     def do_POST(self):
@@ -90,9 +98,14 @@ class FakeInstaller(BaseHTTPRequestHandler):
         ha2 = md5(f"POST:{p['uri']}")
         want = md5(f"{ha1}:{p['nonce']}:{p['nc']}:{p['cnonce']}:{p['qop']}:{ha2}")
         if p.get('username') != 'rokudev' or p.get('response') != want:
+            if FakeInstaller.refuse_bare:
+                self.send_response(401)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
             return self._challenge()
-        if FakeInstaller.stale_once:
-            FakeInstaller.stale_once, FakeInstaller.nonce = False, 'n0nce2'
+        if FakeInstaller.stale_once or FakeInstaller.stale_always:
+            FakeInstaller.stale_once, FakeInstaller.nonce = False, FakeInstaller.nonce + 'x'
             return self._challenge(stale=True)
         if p['nonce'] != FakeInstaller.nonce:
             return self._challenge()
@@ -108,6 +121,7 @@ class FakeInstaller(BaseHTTPRequestHandler):
 def tv():
     FakeInstaller.received, FakeInstaller.attempts, FakeInstaller.uploads = [], 0, 0
     FakeInstaller.stale_once, FakeInstaller.nonce = False, 'n0nce'
+    FakeInstaller.stale_always = FakeInstaller.preflight_404 = FakeInstaller.refuse_bare = False
     FakeInstaller.reply = b'<script>var m = [{"text":"Install Success."}]</script>'
     srv = ThreadingHTTPServer(('127.0.0.1', 0), FakeInstaller)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -789,8 +803,8 @@ def test_no_answer_after_sending_the_app_with_the_password(slow_tv):
     assert e.value.uploaded
 
 
-def test_an_upload_without_a_password_doesnt_count_as_sent(slow_tv):
-    SlowAuthInstaller.preflight_404 = True          # no challenge up front: the first upload goes without one
+def test_an_upload_without_a_password_doesnt_count_as_sent(slow_tv, monkeypatch):
+    monkeypatch.setattr(SlowAuthInstaller, 'preflight_404', True)          # no challenge up front: the first upload goes without one
     with pytest.raises(roku.TookTooLong) as e:
         roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=0.8, port=slow_tv)
     assert FakeInstaller.uploads == 2               # the bare one, then the one with the password ...
@@ -894,6 +908,7 @@ def test_a_call_inside_a_call_is_capped_by_the_outer_one():
 
 
 def test_plays_own_mistakes_arent_called_an_odd_challenge(tv, monkeypatch):
+    FakeInstaller.preflight_404 = True              # so the password goes with urllib's retry of the upload
     real = roku._Connection.request
 
     def broken(self, method, url, body=None, headers={}, **kw):
@@ -922,7 +937,7 @@ def test_a_bare_upload_doesnt_count_as_sent(monkeypatch):
         def do_POST(self):
             self.rfile.read(int(self.headers.get('Content-Length') or 0))
             time.sleep(3)                           # no challenge: the upload without a password just hangs
-    SlowAuthInstaller.preflight_404 = True
+    monkeypatch.setattr(SlowAuthInstaller, 'preflight_404', True)
     srv = ThreadingHTTPServer(('127.0.0.1', 0), BareSlow)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -937,12 +952,76 @@ def test_a_call_inside_a_call_reports_what_it_sent():
     outer_seen = {}
 
     def outer():
-        inner = {}
-
-        def send():
-            roku._current.deadline.sent(True)
-            inner['d'] = roku._current.deadline
-        roku.within(5, send)
+        roku.within(5, lambda: roku._current.deadline.sent(True))
         outer_seen['uploaded'] = roku._current.deadline.uploaded
     roku.within(5, outer)
     assert outer_seen['uploaded'] is True
+
+
+
+# ------------------------------------------------------------------ 66c4407 review
+def test_a_refusal_without_a_challenge_is_a_wrong_password(tv):
+    FakeInstaller.refuse_bare = True
+    with pytest.raises(roku.WrongPassword):
+        roku.install('127.0.0.1', 'nope', b'ZIP', port=tv)
+
+
+def test_a_tv_that_always_says_stale_gets_one_retry(tv):
+    FakeInstaller.stale_always = True
+    with pytest.raises(roku.WrongPassword):
+        roku.install('127.0.0.1', 'secret', b'ZIPDATA', port=tv)
+    assert FakeInstaller.attempts == 2                                        # the upload and one retry
+
+
+def test_plays_own_verdicts_come_through_even_after_the_limit():
+    def judge():
+        d = roku._current.deadline
+        time.sleep(0.3)
+        d.cut = True                                # as if the cut-off had closed something meanwhile
+        raise roku.WrongPassword('refused')
+    with pytest.raises(roku.WrongPassword):
+        roku.within(0.1, judge)
+
+
+def test_an_error_the_cut_off_didnt_cause_is_its_own():
+    def reset():
+        time.sleep(0.3)                             # past the limit, but nothing of this call was closed
+        raise ConnectionResetError('reset by the TV')
+    with pytest.raises(ConnectionResetError):
+        roku.within(0.1, reset)
+
+
+def test_a_retry_cut_off_before_its_upload_finished_isnt_unsure(tv, monkeypatch):
+    FakeInstaller.stale_once = True                 # the upload goes, the TV asks for a fresh nonce ...
+    real = roku.http.client.HTTPConnection.request
+    authorized = []
+
+    def request(self, method, url, body=None, headers={}, **kw):
+        if body and any(k.lower() == 'authorization' for k in headers):
+            authorized.append(1)
+            if len(authorized) == 2:                # ... and the retry is still being sent when time runs out
+                d = roku._current.deadline
+                while not d.expired:
+                    time.sleep(0.02)
+                raise BrokenPipeError('the connection was closed mid-upload')
+        return real(self, method, url, body, headers, **kw)
+    monkeypatch.setattr(roku.http.client.HTTPConnection, 'request', request)
+    with pytest.raises(roku.TookTooLong) as e:
+        roku.install('127.0.0.1', 'secret', b'ZIPDATA', timeout=1, port=tv)
+    assert not e.value.uploaded                     # the first went (and was answered); the retry didn't finish
+
+
+def test_a_call_inside_a_call_gives_its_connections_to_the_outer_one():
+    class Sock:
+        def shutdown(self, how):
+            pass
+
+        def detach(self):
+            return -1
+    sock, seen = Sock(), {}
+
+    def outer():
+        roku.within(5, lambda: roku._current.deadline.add(sock))
+        seen['outer'] = list(roku._current.deadline.socks)
+    roku.within(5, outer)
+    assert seen['outer'] == [sock]
