@@ -1187,3 +1187,42 @@ def test_a_renamed_folder_with_a_sleeping_link_keeps_its_titles(tmp_path):
     assert titles_now(lb) == ['Alien', 'Heat']
     lb.set_folders([{'path': str(media)}, {'path': str(media / 'Children')}])   # Settings updated
     assert titles_now(lb) == ['Alien', 'Heat']
+
+
+
+# ------------------------------------------------------------------ 41e603e review
+def test_an_offline_link_keeps_the_target_it_had_online(tmp_path, monkeypatch):
+    nas = tmp_path / 'NAS'
+    make(str(nas), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', nas)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(nas)}])
+    assert titles_now(lb) == ['Alien', 'Heat']
+    os.rename(str(nas), str(tmp_path / 'asleep'))
+    real = library.os.path.realpath
+
+    def offline_realpath(p, *a, **k):                # a \\nas or mapped-drive link offline: resolves to itself
+        return str(p) if os.path.normcase(str(p)).endswith('films') else real(p, *a, **k)
+    monkeypatch.setattr(library.os.path, 'realpath', offline_realpath)
+    lb.scan()
+    lb.set_folders([{'path': str(media)}])           # the NAS folder is removed from Settings while it sleeps
+    assert titles_now(lb) == ['Alien', 'Heat']
+    assert lb._links[os.path.normcase(str(media / 'Films'))][1] == os.path.normcase(str(nas))
+
+
+def test_switching_a_folder_from_its_link_to_its_target_while_unplugged(tmp_path):
+    films = tmp_path / 'Films'
+    make(str(films), 'Alien 1979.mkv')
+    _junction(tmp_path / 'J', films)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(tmp_path / 'J')}])
+    assert titles_now(lb) == ['Alien']
+    os.rename(str(films), str(tmp_path / 'unplugged'))
+    assert titles_now(lb) == ['Alien']
+    lb.scan()
+    # Settings: from the link J to Films itself, while it's unplugged. Only the folder changes: both lead to
+    # the same real place, and the last scan's titles are the same.
+    lb.set_folders([{'path': str(films)}])
+    assert titles_now(lb) == ['Alien']

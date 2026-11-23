@@ -227,7 +227,7 @@ class Library:
         self._into = {}            # normcased root -> real folders of other media folders it reaches (links,
                                    # or one nested in it): files there are Kids when this folder is
         self._incomplete = False   # the last scan couldn't read everything (folders, links or subfolders)
-        self._links = {}           # link (normcased) -> (its path, real target), as last seen online
+        self._links = {}           # link (normcased) -> (its path, real target): online, or remembered from then
         self.missing = []          # media folders that aren't there any more (deleted or renamed)
         self._pool_cache = (None, None)   # (what it was built from, the kept-titles pool)
         self._live_roots = set()   # roots the last walk reached (their files win over kept ones)
@@ -334,7 +334,7 @@ class Library:
             real_of = {r: os.path.normcase(w) for r, w in real_w_of.items()}
             real_roots = set(real_of.values())
             raw, reached, dirty, errored, links_off, into = {}, set(), False, [], [], {}
-            sc, all_errs = _ScanState(cache, pending, first, real_roots), []
+            sc, all_errs = _ScanState(cache, pending, first, real_roots, self._links), []
             now_w = time.time()
             with self.lock:
                 since = dict(self.data['unreadable_since'])
@@ -366,14 +366,15 @@ class Library:
                 if pool is not None:
                     return pool
                 key = (tuple(sorted((r, hash(tuple(v))) for r, v in prev_raw.items())),
-                       tuple((r, real_of.get(r)) for r in roots), tuple(sorted(links.items())), tuple(sorted(gone)))
+                       tuple((f['path'], real_of.get(r)) for f, r in zip(folders, roots)),
+                       tuple(sorted(links.items())), tuple(sorted(gone)))
                 if self._pool_cache[0] == key:
                     pool = self._pool_cache[1]
                     return pool
                 anchors = [(real_of[r], f['path'], r) for f, r in zip(folders, roots) if r in real_of and r not in gone]
                 for lk, (lp, t) in links.items():
                     ow = owner(lk)
-                    if ow is not None and ow not in gone:
+                    if ow is not None:               # (a gone folder has no links: its walk didn't run)
                         anchors.append((t, lp, ow))
                 anchors = sorted(((t.rstrip(os.sep) + os.sep, base, o) for t, base, o in anchors),
                                  key=lambda x: -len(x[0]))
@@ -396,7 +397,7 @@ class Library:
                             pool.setdefault(o, {}).setdefault(k, e)
                 self._pool_cache = (key, pool)
                 return pool
-            results, gone = {}, set()
+            results = {}
             for f, root in zip(folders, roots):
                 # media folders inside this one, with where they really are (None: not known, it's offline)
                 others = {r: real_of.get(r) for r in roots
@@ -421,7 +422,8 @@ class Library:
             all_lost = [x for _, lost in results.values() for x in lost]
             for lk, v in old_links.items():
                 ow = owner(lk)
-                if lk not in links and ow is not None and ow not in gone and (ow not in reached or _under(lk, all_lost)):
+                if lk not in links and ow is not None and ow not in gone and \
+                        (ow not in reached or _under(lk, all_lost)):
                     links[lk] = v
             for root, (files, lost) in results.items():
                 # a subfolder or link that couldn't be read keeps what it had: its titles don't vanish
@@ -912,17 +914,18 @@ class _ScanState:
     locations, files and folder listings already read (by real location), and the links seen (link -> (its path,
     where it leads), offline ones too)."""
 
-    def __init__(self, cache, pending, first, real_roots=frozenset()):
+    def __init__(self, cache, pending, first, real_roots=frozenset(), old_links=None):
         self.cache, self.pending, self.new_pending, self.first = cache, pending, {}, first
         self.real_roots, self.by_real, self.listings, self.links = set(real_roots), {}, {}, {}
+        self.old_links = old_links or {}       # the links remembered from earlier scans
 
 
 def _walk(root, skip_roots, sc, root_real_w=None):
     """One media folder. Returns ([(fp, path, ext, size, real location as written, normcased)], could the folder
     be listed, did the cache change, [normcased folders that couldn't be listed], [links whose target is offline],
     [real folders of other media folders that a link or subfolder here leads into]). sc is the scan's shared
-    _ScanState: a folder or file reached through two media folders is listed and fingerprinted once. A file that can't be read
-    counts as an error (its path is in the errors list), so its titles are kept.
+    _ScanState: a folder or file reached through two media folders is listed and fingerprinted once. A file
+    that can't be read counts as an error (its path is in the errors list), so its titles are kept.
 
     Every file is named and keyed by its path inside the media folder, through any link, so show and season names
     come from the media folder and a fingerprint follows the path it was taken at. Junctions, mount points and
@@ -976,18 +979,25 @@ def _walk(root, skip_roots, sc, root_real_w=None):
                     if own:
                         into_roots.append(own)
                     continue
+                lkey = os.path.normcase(path)
                 try:
-                    real_w = os.path.realpath(path)    # an unplugged junction still says where it leads
+                    real_w = os.path.realpath(path)
                     real = os.path.normcase(real_w)
                 except OSError:
-                    offline.append(path)
-                    continue
-                links[os.path.normcase(path)] = (path, real)
+                    real = None
                 try:
+                    if real is None:
+                        raise OSError
                     os.stat(path)
                 except OSError:                    # an unplugged target: keep its titles (they are keyed by path)
                     offline.append(path)
+                    # where it leads: as remembered from when it was online (offline, a link to \\nas or to a
+                    # mapped drive resolves differently), else what an unplugged junction still says
+                    remembered = sc.old_links.get(lkey)
+                    if remembered or real:
+                        links[lkey] = remembered or (path, real)
                     continue
+                links[lkey] = (path, real)
                 if _under(real, other_roots):      # another media folder's own: it walks it, Kids flows through
                     into_roots.append(real)
                     continue
