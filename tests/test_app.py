@@ -863,35 +863,6 @@ def test_set_up_tvs_is_one_dialog_and_opens_again(win, monkeypatch):
     assert len(shown) == 2 and shown[1] is shown[0] and shown[0].closing
 
 
-def test_new_collection_is_always_there_and_uses_the_selection(win, monkeypatch):
-    told = []
-    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
-    button = next(b for b in win.findChildren(pa.QPushButton) if b.text() == 'New collection…')
-    win.view.clearSelection()
-    button.click()                                  # nothing selected: says how, makes nothing
-    assert told and not win.lib.data['collections']
-    win.filter = 'all'
-    win.refresh()
-    films = [i for i in win.lib._items if i['kind'] == 'movie' and i['title'].startswith('Jungle')]
-    win._reselect([i['id'] for i in films])         # the real rows, selected in the view
-    episode = next(i for i in win.lib._items if i['kind'] == 'episode')
-    win._reselect([episode['id']])
-    win._sel_changed()
-    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Comedy', True))
-    told.clear()
-    button.click()
-    (c,) = win.lib.data['collections'].values()
-    assert c['name'] == 'Comedy' and sorted(c['members']) == sorted(i['id'] for i in films)   # films only
-    assert any('episode' in t for t in told)        # and it says the episode was left out
-
-
-def test_new_collection_cancelled_makes_nothing(win, monkeypatch):
-    win.sel = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
-    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('', False))
-    win.new_collection()
-    assert not win.lib.data['collections']
-
-
 # ------------------------------------------------------------------ one default folder, Add media, the panel
 def test_a_new_play_starts_with_one_default_folder(win, monkeypatch, tmp_path):
     monkeypatch.setattr(library, 'default_folder_path', lambda: str(tmp_path / 'Videos' / 'PLAY'))
@@ -972,50 +943,6 @@ def test_the_panel_on_the_right_shows_only_with_a_selection(win):
 def _films(win, n=None):
     fs = [i for i in win.lib._items if i['kind'] == 'movie']
     return fs[:n] if n else fs
-
-
-def test_taking_films_out_of_a_collection_asks_first(win, monkeypatch):
-    films = _films(win, 3)
-    marvel = win.lib.make_collection('Marvel', [films[0]['id'], films[1]['id']])
-    asked = []
-    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: asked.append(text) or False)
-    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Action', True))
-    win.sel = films
-    win.new_collection()
-    assert 'Marvel' in asked[0] and 'removed' in asked[0]                   # it would be left empty
-    assert set(win.lib.data['collections']) == {marvel}                     # said no: nothing changed
-
-
-def test_the_collection_dropdown_asks_too(win, monkeypatch):
-    films = _films(win, 2)
-    win.lib.make_collection('Marvel', [films[0]['id']])
-    asked = []
-    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: asked.append(text) or False)
-    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('Action', True))
-    win.sel = films
-    win.d_col.addItem('New collection…', '__new__')
-    win.d_col.setCurrentIndex(win.d_col.count() - 1)
-    win._col_picked(0)
-    assert asked and 'Marvel' in asked[0]
-
-
-def test_an_existing_name_adds_to_that_collection(win, monkeypatch):
-    films = _films(win, 2)
-    comedy = win.lib.make_collection('Comedy', [films[0]['id']])
-    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: True)
-    monkeypatch.setattr(pa.QInputDialog, 'getText', lambda *a, **k: ('comedy ', True))
-    win.sel = [films[1]]
-    win.new_collection()
-    assert list(win.lib.data['collections']) == [comedy]                    # no second "Comedy"
-    assert win.lib.data['collections'][comedy]['members'] == [films[0]['id'], films[1]['id']]
-
-
-def test_only_episodes_selected_says_why(win, monkeypatch):
-    told = []
-    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
-    win.sel = [i for i in win.lib._items if i['kind'] == 'episode']
-    win.new_collection()
-    assert "Episodes can't go in a collection" in told[0] and not win.lib.data['collections']
 
 
 
@@ -1167,3 +1094,147 @@ def test_the_style_is_set_once_and_the_stylesheet_once_per_skin(qapp, monkeypatc
     pa.apply_skin(qapp, names[1])                   # a different skin
     pa.apply_skin(qapp, names[0])
     assert calls == {'style': 1, 'sheet': 3}        # Fusion once; one stylesheet per skin
+
+
+
+# ------------------------------------------------------------------ the collection window, the pick window, Add to Kids
+def _capture_dialogs(monkeypatch):
+    shown = []
+    monkeypatch.setattr(pa, 'run_dialog', lambda d, *a: shown.append(d))
+    return shown
+
+
+def test_new_collection_opens_the_window_with_the_selection_in_it(win, monkeypatch):
+    shown = _capture_dialogs(monkeypatch)
+    films = _films(win, 2)
+    episode = next(i for i in win.lib._items if i['kind'] == 'episode')
+    win.sel = films + [episode]
+    next(b for b in win.findChildren(pa.QPushButton) if b.text() == 'New collection…').click()
+    (d,) = shown
+    assert isinstance(d, pa.CollectionDialog) and d.cid is None
+    assert sorted(d.ids()) == sorted(i['id'] for i in films)              # films only, nothing asked first
+    win.sel = []
+    win.new_collection()                            # nothing selected: the window still opens, empty
+    assert shown[1].ids() == []
+
+
+def test_the_collection_window_makes_a_collection(win, monkeypatch):
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    d = pa.CollectionDialog(win, win.lib, None, [])
+    d._save()
+    assert 'name' in told[-1] and not win.lib.data['collections']           # a name first
+    d.name.setText('Comedy')
+    d._save()
+    assert 'Add at least one film' in told[-1]
+    films = _films(win, 3)
+    monkeypatch.setattr(pa.PickDialog, 'exec', lambda self: QDialog.Accepted)
+    monkeypatch.setattr(pa.PickDialog, 'picked', lambda self: [i['id'] for i in films])
+    d._pick()                                       # + Add films
+    assert sorted(d.ids()) == sorted(i['id'] for i in films)
+    d.custom.setChecked(True)
+    d._save()
+    (c,) = win.lib.data['collections'].values()
+    assert c['name'] == 'Comedy' and c['order'] == 'custom' and sorted(c['members']) == sorted(d.ids())
+    d.deleteLater()
+
+
+def test_the_pick_window_offers_only_what_isnt_in_the_collection(win, monkeypatch):
+    films = _films(win, 3)
+    cid = win.lib.make_collection('Comedy', [films[0]['id']])
+    d = pa.CollectionDialog(win, win.lib, cid)
+    offered = []
+    real_init = pa.PickDialog.__init__
+
+    def spy(self, parent, title, items, *a, **k):
+        offered.extend(i['id'] for i in items)
+        real_init(self, parent, title, items, *a, **k)
+    monkeypatch.setattr(pa.PickDialog, '__init__', spy)
+    monkeypatch.setattr(pa.PickDialog, 'exec', lambda self: QDialog.Rejected)
+    d._pick()
+    assert films[0]['id'] not in offered and films[1]['id'] in offered
+    assert all(win.lib.by_id(i)['kind'] == 'movie' for i in offered)       # episodes aren't offered
+    d.deleteLater()
+
+
+def test_a_name_that_exists_is_refused(win, monkeypatch):
+    films = _films(win, 2)
+    win.lib.make_collection('Comedy', [films[0]['id']])
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    d = pa.CollectionDialog(win, win.lib, None, [films[1]['id']])
+    d.name.setText(' comedy')
+    d._save()
+    assert 'already a collection called' in told[-1] and len(win.lib.data['collections']) == 1
+    d.deleteLater()
+
+
+def test_taking_films_out_of_another_collection_asks_first(win, monkeypatch):
+    films = _films(win, 3)
+    marvel = win.lib.make_collection('Marvel', [films[0]['id'], films[1]['id']])
+    asked = []
+    monkeypatch.setattr(pa, 'ask', lambda parent, title, text: asked.append(text) or False)
+    d = pa.CollectionDialog(win, win.lib, None, [i['id'] for i in films])
+    d.name.setText('Action')
+    d._save()
+    assert 'Marvel' in asked[0] and 'removed' in asked[0]                   # it would be left empty
+    assert set(win.lib.data['collections']) == {marvel}                     # said no: nothing changed
+    d.deleteLater()
+
+
+def test_editing_a_collection_and_deleting_it(win, monkeypatch):
+    films = _films(win, 2)
+    cid = win.lib.make_collection('Comedy', [i['id'] for i in films])
+    d = pa.CollectionDialog(win, win.lib, cid)
+    d.list.setCurrentRow(0)
+    d.list.item(0).setSelected(True)
+    d._remove()
+    d.name.setText('Funny')
+    d._save()
+    c = win.lib.data['collections'][cid]
+    assert c['name'] == 'Funny' and len(c['members']) == 1
+    monkeypatch.setattr(pa, 'ask', lambda *a: True)
+    d2 = pa.CollectionDialog(win, win.lib, cid)
+    d2._delete()
+    assert cid not in win.lib.data['collections']
+    d.deleteLater()
+    d2.deleteLater()
+
+
+def test_the_pick_window_searches_and_selects_what_is_shown(win):
+    items = win.lib._items
+    d = pa.PickDialog(win, 'Add', items, 'Pick')
+    d.search.setText('ann droid')
+    shown = [d.list.item(r) for r in range(d.list.count()) if not d.list.item(r).isHidden()]
+    assert shown and all('Ann Droid' in it.text() for it in shown)
+    assert not d.ok.isEnabled()                     # nothing picked yet
+    d._tick_shown(pa.Qt.Checked)
+    assert sorted(d.picked()) == sorted(it.data(pa.ID) for it in shown) and d.ok.isEnabled()
+    d.deleteLater()
+
+
+def test_the_add_to_kids_button_shows_in_the_kids_view(win):
+    win.show()
+    rows = {win.rail.item(r).data(pa.ID): r for r in range(win.rail.count())}
+    win.rail.setCurrentRow(rows['kids'])
+    assert win.kids_add.isVisible()
+    win.rail.setCurrentRow(rows['all'])
+    assert not win.kids_add.isVisible()
+    win.hide()
+
+
+def test_add_to_kids_offers_what_isnt_kids_and_marks_the_picks(win, monkeypatch):
+    offered = []
+    real_init = pa.PickDialog.__init__
+
+    def spy(self, parent, title, items, *a, **k):
+        offered.extend(i['id'] for i in items)
+        real_init(self, parent, title, items, *a, **k)
+    monkeypatch.setattr(pa.PickDialog, '__init__', spy)
+    target = next(i for i in win.lib._items if not i['kids'])
+    monkeypatch.setattr(pa.PickDialog, 'exec', lambda self: QDialog.Accepted)
+    monkeypatch.setattr(pa.PickDialog, 'picked', lambda self: [target['id']])
+    win.add_to_kids()
+    assert all(not win.lib.by_id(i)['kids'] or i == target['id'] for i in offered)
+    assert not any(i['kids'] and i['id'] in offered and i['id'] != target['id'] for i in win.lib._items)
+    assert win.lib.by_id(target['id'])['kids']

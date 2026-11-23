@@ -300,15 +300,95 @@ class SettingsDialog(QDialog):
         return fs, self.port.value(), self.skin.currentText(), self.auto.isChecked()
 
 
+def title_line(i):
+    """How a title reads in a pick list: "Heat (1995)", "Bluey · S1 E3 · The Pool"."""
+    if i['kind'] == 'episode':
+        season = 'Specials' if i.get('season') == 0 else f"S{i.get('season')}"
+        return f"{i['show']} · {season} E{i.get('episode')} · {i['title']}"
+    return f"{i['title']} ({i['year']})" if i.get('year') else i['title']
+
+
+class PickDialog(QDialog):
+    """Pick titles from a list: a search box, tick boxes, Select all shown. picked() gives the ids ticked."""
+
+    def __init__(self, parent, title, items, prompt, button='Add'):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(520, 560)
+        v = QVBoxLayout(self)
+        note = QLabel(prompt)
+        note.setWordWrap(True)
+        v.addWidget(note)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Search')
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+        v.addWidget(self.search)
+        self.list = QListWidget()
+        for i in sorted(items, key=lambda i: (names.sort_key(i['show'] if i['kind'] == 'episode' else i['title']),
+                                              i.get('season') or 0, i.get('episode') or 0)):
+            it = QListWidgetItem(title_line(i))
+            it.setData(ID, i['id'])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked)
+            self.list.addItem(it)
+        self.list.itemChanged.connect(lambda *_: self._count())
+        v.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        allb, noneb = QPushButton('Select all shown'), QPushButton('Clear')
+        for b in (allb, noneb):
+            b.setObjectName('chip')
+            row.addWidget(b)
+        allb.clicked.connect(lambda: self._tick_shown(Qt.Checked))
+        noneb.clicked.connect(lambda: self._tick_shown(Qt.Unchecked))
+        row.addStretch()
+        self.count = QLabel()
+        row.addWidget(self.count)
+        v.addLayout(row)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.ok = bb.button(QDialogButtonBox.Ok)
+        self.ok.setText(button)
+        self.ok.setObjectName('primary')
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+        self._count()
+
+    def _filter(self, text):
+        q = text.strip().lower()
+        for r in range(self.list.count()):
+            it = self.list.item(r)
+            it.setHidden(bool(q) and q not in it.text().lower())
+
+    def _tick_shown(self, state):
+        for r in range(self.list.count()):
+            it = self.list.item(r)
+            if not it.isHidden():
+                it.setCheckState(state)
+
+    def picked(self):
+        return [self.list.item(r).data(ID) for r in range(self.list.count())
+                if self.list.item(r).checkState() == Qt.Checked]
+
+    def _count(self):
+        n = len(self.picked())
+        self.count.setText(f'{n} picked' if n else '')
+        self.ok.setEnabled(bool(n))
+
+
 class CollectionDialog(QDialog):
-    def __init__(self, parent, lib, cid):
+    """Make a collection (cid None) or change one: its name, its films (+ Add films: pick from every film, with
+    search) and their order."""
+
+    def __init__(self, parent, lib, cid=None, preselect=()):
         super().__init__(parent)
         self.lib, self.cid = lib, cid
-        c = lib.data['collections'][cid]
-        self.setWindowTitle('Collection')
-        self.setMinimumSize(480, 460)
+        c = lib.data['collections'][cid] if cid else {'name': '', 'order': 'year'}
+        self.setWindowTitle('Collection' if cid else 'New collection')
+        self.setMinimumSize(520, 520)
         v = QVBoxLayout(self)
         self.name = QLineEdit(c['name'])
+        self.name.setPlaceholderText('For example: Comedy')
         v.addWidget(QLabel('Name on the TV'))
         v.addWidget(self.name)
         v.addWidget(QLabel('Order'))
@@ -323,27 +403,33 @@ class CollectionDialog(QDialog):
         seg.addStretch()
         (self.custom if c.get('order') == 'custom' else self.by_year).setChecked(True)
         v.addLayout(seg)
+        v.addWidget(QLabel('Films in it'))
         self.list = QListWidget()
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.known = {}                     # id -> the film as listed when the dialog opened
-        for m in lib.collection_members(cid):
-            self.known[m['id']] = m
-            it = QListWidgetItem(f"{m['title']}   {m.get('year') or ''}".rstrip())
-            it.setData(ID, m['id'])
-            self.list.addItem(it)
-        self.shown = list(self.known)
-        v.addWidget(self.list)
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.known = {}                     # id -> the film, for every film the dialog has listed
+        members = lib.collection_members(cid) if cid else []
+        self.shown = [m['id'] for m in members]
+        by_id = {i['id']: i for i in lib._items}
+        for m in members + [by_id[i] for i in preselect if i in by_id and by_id[i]['kind'] == 'movie'
+                            and i not in self.shown]:
+            self._add_row(m)
+        v.addWidget(self.list, 1)
         self.order.buttonToggled.connect(self._order_changed)
         self._order_changed()
         row = QHBoxLayout()
-        rem, dele = QPushButton('Remove from collection'), QPushButton('Delete collection')
-        rem.setObjectName('chip')
-        dele.setObjectName('chip')
-        rem.clicked.connect(lambda: self.list.takeItem(self.list.currentRow()))
-        dele.clicked.connect(self._delete)
-        row.addWidget(rem)
-        row.addWidget(dele)
+        add, rem = QPushButton('+ Add films…'), QPushButton('Remove')
+        for b in (add, rem):
+            b.setObjectName('chip')
+            row.addWidget(b)
+        add.clicked.connect(self._pick)
+        rem.clicked.connect(self._remove)
         row.addStretch()
+        if cid:
+            dele = QPushButton('Delete collection')
+            dele.setObjectName('chip')
+            dele.clicked.connect(self._delete)
+            row.addWidget(dele)
         v.addLayout(row)
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Save).setObjectName('primary')
@@ -351,12 +437,38 @@ class CollectionDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
+    def _add_row(self, m):
+        self.known[m['id']] = m
+        it = QListWidgetItem(f"{m['title']}   {m.get('year') or ''}".rstrip())
+        it.setData(ID, m['id'])
+        self.list.addItem(it)
+
+    def ids(self):
+        return [self.list.item(i).data(ID) for i in range(self.list.count())]
+
+    def _pick(self):
+        have = set(self.ids())
+        films = [i for i in self.lib._items if i['kind'] == 'movie' and i['id'] not in have]
+        d = PickDialog(self, 'Add films', films, 'Tick the films to add (search to find them).')
+        try:
+            if d.exec() != QDialog.Accepted:
+                return
+            by_id = {i['id']: i for i in films}
+            for fid in d.picked():
+                self._add_row(by_id[fid])
+        finally:
+            d.deleteLater()
+        self._order_changed()
+
+    def _remove(self):
+        for it in self.list.selectedItems():
+            self.list.takeItem(self.list.row(it))
+
     def _order_changed(self, *_):
         custom = self.custom.isChecked()
         self.list.setDragEnabled(custom)
         if not custom:   # show the year order right away (from the list as it opened: nothing is dropped)
-            ids = [self.list.item(i).data(ID) for i in range(self.list.count())]
-            self._reorder(sorted(ids, key=lambda i: library.release_key(self.known[i])))
+            self._reorder(sorted(self.ids(), key=lambda i: library.release_key(self.known[i])))
 
     def _reorder(self, ids):
         rows = {self.list.item(i).data(ID): self.list.item(i).text() for i in range(self.list.count())}
@@ -367,13 +479,33 @@ class CollectionDialog(QDialog):
             self.list.addItem(it)
 
     def _delete(self):
-        self.lib.delete_collection(self.cid)
-        self.accept()
+        if ask(self, 'Delete collection', f'Delete the collection {self.lib.data["collections"][self.cid]["name"]}? '
+                                          'The films stay in the library.'):
+            self.lib.delete_collection(self.cid)
+            self.accept()
 
     def _save(self):
-        members = [self.list.item(i).data(ID) for i in range(self.list.count())]
-        self.lib.update_collection(self.cid, name=self.name.text(), members=members, shown=self.shown,
-                                   order='custom' if self.custom.isChecked() else 'year')
+        name, members = self.name.text().strip(), self.ids()
+        order = 'custom' if self.custom.isChecked() else 'year'
+        if not name:
+            QMessageBox.information(self, 'Collection', 'Give it a name (the TV shows it).')
+            return
+        if not members:
+            QMessageBox.information(self, 'Collection', 'Add at least one film (+ Add films).')
+            return
+        same = next((k for k, c in self.lib.data['collections'].items()
+                     if k != self.cid and c['name'].strip().casefold() == name.casefold()), None)
+        if same:
+            QMessageBox.information(self, 'Collection', f'There is already a collection called {name}. Give this '
+                                    'one another name, or open that one to add these films.')
+            return
+        mover = getattr(self.parent(), '_moves_ok', None)
+        if mover and not mover(members, into=self.cid):
+            return
+        if self.cid:
+            self.lib.update_collection(self.cid, name=name, members=members, shown=self.shown, order=order)
+        else:
+            self.cid = self.lib.make_collection(name, members, order=order)
         self.accept()
 
 
@@ -456,9 +588,15 @@ class Window(QMainWindow):
         head.addWidget(am)
         nc = QPushButton('New collection…')            # always here: any group of films, named as you like
         nc.setObjectName('chip')
-        nc.setToolTip('Select the films, then click to group them under one name on the TV (like "Comedy")')
+        nc.setToolTip('Make a collection: name it (like "Comedy") and pick its films')
         nc.clicked.connect(self.new_collection)
         head.addWidget(nc)
+        self.kids_add = QPushButton('+ Add to Kids…')  # only in the Kids view
+        self.kids_add.setObjectName('chip')
+        self.kids_add.setToolTip('Pick titles from the whole library to show in KIDS')
+        self.kids_add.clicked.connect(self.add_to_kids)
+        self.kids_add.setVisible(False)
+        head.addWidget(self.kids_add)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search titles (Ctrl+F)')
         self.search.setClearButtonEnabled(True)
@@ -626,6 +764,7 @@ class Window(QMainWindow):
         if cur:
             self.filter = cur.data(ID)
             self.heading.setText(cur.text().split('   ')[0])
+            self.kids_add.setVisible(self.filter == 'kids')
             self.refresh()
 
     def _matches(self, i):
@@ -919,7 +1058,7 @@ class Window(QMainWindow):
         cid = self.d_col.currentData()
         ids = [i['id'] for i in self.sel]
         if cid == '__new__':
-            self._create_collection(self.sel, self.sel[0]['title'] if len(self.sel) == 1 else '')
+            run_dialog(CollectionDialog(self, self.lib, None, ids))
         elif cid is None:
             self.lib.remove_from_collections(ids)
         elif self._moves_ok(ids, into=cid):
@@ -946,29 +1085,6 @@ class Window(QMainWindow):
             return True
         return ask(self, 'Collections', 'These films are in other collections now:\n\n' + '\n'.join(lines) +
                    '\n\nGo ahead?')
-
-    def _create_collection(self, films, name=''):
-        """Name a collection for these films (the one place both "New collection" paths go through). A name that
-        exists already offers to add them to that collection instead of making a second one."""
-        ids = [i['id'] for i in films]
-        prompt = f'Name on the TV for these {len(films)} films:' if len(films) > 1 else 'Name on the TV:'
-        name, ok = QInputDialog.getText(self, 'New collection', prompt, text=name)
-        name = (name or '').strip()
-        if not ok or not name:
-            return None
-        same = next((cid for cid, c in self.lib.data['collections'].items()
-                     if c['name'].strip().casefold() == name.casefold()), None)
-        if same:
-            if not ask(self, 'New collection', f'There is already a collection called {name}. Add these films '
-                                               f'to it?'):
-                return None
-            if not self._moves_ok(ids, into=same):
-                return None
-            self._add_to_collection(same, ids)
-            return same
-        if not self._moves_ok(ids):
-            return None
-        return self.lib.make_collection(name, ids)
 
     def _dismiss(self):
         if self.suggestion:
@@ -1043,20 +1159,30 @@ class Window(QMainWindow):
             QApplication.instance().quit()
 
     def new_collection(self):
-        """A collection of the selected films, named by you. Shows on the TV as one entry. (Its order and name
-        can be changed later: double-click it under Collections.)"""
-        films = [i for i in self.sel if i['kind'] == 'movie']
-        episodes = len(self.sel) - len(films)
-        if not films:
-            QMessageBox.information(self, 'New collection', (
-                'Episodes can\'t go in a collection (a show is already one entry on the TV). ' if episodes else '') +
-                'Select the films for it first (Ctrl-click or Shift-click to pick several), then click New collection.')
-            return
-        if episodes:
-            QMessageBox.information(self, 'New collection', f'{plural(episodes, "episode")} left out: episodes '
-                                    'can\'t go in a collection (a show is already one entry on the TV).')
-        self._create_collection(films)
+        """The collection window: name it, pick its films (any selected films are in it already), order them."""
+        films = [i['id'] for i in self.sel if i['kind'] == 'movie']
+        run_dialog(CollectionDialog(self, self.lib, None, films))
         self.refresh()
+
+    def add_to_kids(self):
+        """Pick titles from the whole library (those not Kids yet) and mark them Kids."""
+        if self.busy():
+            return
+        rest = [i for i in self.lib._items if not i['kids']]
+        if not rest:
+            QMessageBox.information(self, 'Add to Kids', 'Everything in the library is in Kids already.')
+            return
+        d = PickDialog(self, 'Add to Kids', rest, 'Tick what should show in KIDS on the TV. Search a show\'s name '
+                       'and use Select all shown to add all its episodes.', button='Add to Kids')
+        try:
+            if d.exec() != QDialog.Accepted:
+                return
+            ids = d.picked()
+        finally:
+            d.deleteLater()
+        if ids:
+            self.lib.set_items(ids, kids=True)
+            self.refresh()
 
     def _make_suggested(self):
         s = self.suggestion
@@ -1212,6 +1338,9 @@ EXTRA_QSS = """
     QListWidget#rail::item:selected {{ background:{sel}; color:#ffffff; }}
     QPushButton#chip:checked {{ background:{accent}; color:#04121f; border-color:{accent}; font-weight:600; }}
     QWidget#detail {{ background:{bar}; }}
+    QListView::indicator {{ width:14px; height:14px; border:1px solid #8a919c; border-radius:3px;
+                           background:{base}; }}
+    QListView::indicator:checked {{ background:{accent}; border-color:{accent}; }}
 """
 
 
