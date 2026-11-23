@@ -7,7 +7,7 @@ import sys
 import threading
 
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QColor, QIcon, QIntValidator, QPainter, QPainterPath, QPixmap, QStandardItem,
+from PySide6.QtGui import (QAction, QColor, QIcon, QPainter, QPainterPath, QPixmap, QStandardItem,
                            QStandardItemModel)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
@@ -306,13 +306,13 @@ def title_line(i):
     """How a title reads in a pick list: "Heat (1995)", "Bluey · S1 E3 · The Pool", "Bluey · S1 E3-E4"."""
     if i['kind'] == 'episode':
         season = 'Specials' if i.get('season') == 0 else f"S{i.get('season')}"
-        ep = f"E{i.get('episode')}"
-        if i.get('last') and i['last'] != i.get('episode'):
-            ep += f"-E{i['last']}"
+        last = i.get('episode_last')
+        ep = f"E{i.get('episode')}" + (f"-E{last}" if last and last != i.get('episode') else '')
         line = f"{i['show']} · {season} {ep}"
         t = i['title'].strip()
-        # the episode's own name, unless it is only the file name again (the show and its SxxEyy)
-        if t and not t.casefold().startswith(i['show'].casefold()) and not re.search(r'(?i)\bs\d+\s*e\d+', t):
+        # the episode's own name, unless it is the automatic one (the show and its SxxEyy, as PLAY makes it)
+        auto = library._ep_title(i['show'], i.get('season') or 0, i.get('episode') or 0, last)
+        if t and t.casefold() != auto.casefold():
             line += f' · {t}'
         return line
     return f"{i['title']} ({i['year']})" if i.get('year') else i['title']
@@ -505,8 +505,10 @@ class CollectionDialog(QDialog):
         if not name:
             QMessageBox.information(self, 'Collection', 'Give it a name (the TV shows it).')
             return
+        # films on a drive that's away: listed in the collection, not found this scan, and the scan was incomplete
         offline = [m for m in self.lib.data['collections'].get(self.cid, {}).get('members', [])
-                   if m not in self.shown] if self.cid else []        # on a drive that's away: kept as they are
+                   if m not in self.shown and self.lib.by_id(m) is None] \
+            if self.cid and self.lib._incomplete else []
         if not members and not offline:
             QMessageBox.information(self, 'Collection', 'Add at least one film (+ Add films).')
             return
@@ -674,7 +676,6 @@ class Window(QMainWindow):
         self.d_year.setPlaceholderText('none')
         self.d_year.setMaxLength(4)
         self.d_year.setFixedWidth(70)
-        self.d_year.setValidator(QIntValidator(0, 9999, self))
         self.d_year.setToolTip('The release year: shown on the TV, and it puts collections in release order')
         self.d_year.editingFinished.connect(self._year_done)
         yr.addWidget(self.d_year)
@@ -1046,14 +1047,18 @@ class Window(QMainWindow):
         self.lib.set_items([i['id'] for i in self.sel], **kv)
         self.refresh()
 
+    YEARS = (1870, 2100)                               # the first films to a little ahead
+
     def _year_done(self):
         if len(self.sel) == 1 and self.sel[0]['kind'] == 'movie':
             text = self.d_year.text().strip()
-            year = int(text) if text else None
-            if year is not None and not 1900 <= year <= 2100:
+            year = int(text) if text.isdigit() else None
+            if text and (year is None or not self.YEARS[0] <= year <= self.YEARS[1]):
                 self.d_year.setText(str(self.sel[0].get('year') or ''))   # not a year: back as it was
+                self.d_year.setModified(False)
+                self.status.setText(f'"{text}" is not a year ({self.YEARS[0]}-{self.YEARS[1]})')
                 return
-            if year != self.sel[0].get('year'):
+            if year != self.sel[0].get('year'):           # (empty: no year)
                 self.lib.set_item(self.sel[0]['id'], year=year)
                 self.refresh()
         self.d_year.setModified(False)
@@ -1219,8 +1224,10 @@ class Window(QMainWindow):
             return
         rest = [i for i in self.lib._items if not i['kids'] and not i['hidden']]   # (hidden ones never show)
         if not rest:
-            QMessageBox.information(self, 'Add to Kids', 'Everything in the library is in Kids already.'
-                                    if self.lib._items else 'There is nothing in the library yet.')
+            hidden = any(not i['kids'] and i['hidden'] for i in self.lib._items)
+            QMessageBox.information(self, 'Add to Kids', 'There is nothing in the library yet.'
+                                    if not self.lib._items else 'Everything else is hidden (unhide it first).'
+                                    if hidden else 'Everything in the library is in Kids already.')
             return
         d = PickDialog(self, 'Add to Kids', rest, 'Tick what should show in KIDS on the TV. Search a show\'s name '
                        'and use Select all shown to add all its episodes.', button='Add to Kids')

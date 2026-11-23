@@ -1268,7 +1268,6 @@ def test_select_all_shown_counts_once(win, monkeypatch):
     calls = []
     real = pa.PickDialog._count
     monkeypatch.setattr(pa.PickDialog, '_count', lambda self: calls.append(1) or real(self))
-    t = pa.time.monotonic() if hasattr(pa, 'time') else __import__('time').monotonic()
     d._tick_shown(pa.Qt.Checked)
     assert len(calls) == 1 and len(d.picked()) == 2000
     d._tick_shown(pa.Qt.Unchecked)
@@ -1333,10 +1332,20 @@ def test_a_collection_of_only_offline_films_can_still_be_saved(win, monkeypatch)
 
 
 def test_episode_lines_dont_repeat_the_file_name():
-    base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'last': 1}
+    base = {'kind': 'episode', 'show': 'Ann Droid', 'season': 1, 'episode': 1, 'episode_last': None}
     assert pa.title_line(dict(base, title='Ann Droid S01E01')) == 'Ann Droid · S1 E1'
     assert pa.title_line(dict(base, title='The Pool')) == 'Ann Droid · S1 E1 · The Pool'
-    assert pa.title_line(dict(base, title='Two Parter', episode=3, last=4)) == 'Ann Droid · S1 E3-E4 · Two Parter'
+    assert pa.title_line(dict(base, title='Ann Droid and the Pool')) == 'Ann Droid · S1 E1 · Ann Droid and the Pool'
+    two = dict(base, episode=3, episode_last=4)
+    assert pa.title_line(dict(two, title='Ann Droid S01E03-E04')) == 'Ann Droid · S1 E3-E4'
+
+
+def test_a_real_double_episode_shows_both_numbers(win, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 2'), 'Ann Droid S02E03-E04.mkv', b'two' * 100)
+    win.lib.set_folders(win.lib.folders + [{'path': str(tmp_path / 'm')}])
+    win.lib.scan()
+    ep = next(i for i in win.lib.current() if i['kind'] == 'episode' and i.get('season') == 2)
+    assert pa.title_line(ep) == 'Ann Droid · S2 E3-E4'
 
 
 def test_the_dropdowns_new_collection_opens_the_window(win, monkeypatch):
@@ -1348,3 +1357,60 @@ def test_the_dropdowns_new_collection_opens_the_window(win, monkeypatch):
     win.d_col.setCurrentIndex(win.d_col.count() - 1)
     win._col_picked(0)
     assert isinstance(shown[0], pa.CollectionDialog) and sorted(shown[0].ids()) == sorted(i['id'] for i in films)
+
+
+
+# ------------------------------------------------------------------ ce5c370 review
+def _type_year(win, keys):
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+    win.show()
+    win.d_year.setFocus()
+    win.d_year.selectAll()
+    QTest.keyClick(win.d_year, _Qt.Key_Backspace)
+    if keys:
+        QTest.keyClicks(win.d_year, keys)
+    QTest.keyClick(win.d_year, _Qt.Key_Return)      # Enter, as a person ends it
+    win.search.setFocus()
+
+
+def test_typing_in_the_year_box_saves_and_clearing_it_clears(win):
+    film = next(i for i in win.lib._items if i['kind'] == 'movie' and not i.get('year'))
+    win._reselect([film['id']])
+    win._sel_changed()
+    _type_year(win, '1995')
+    assert win.lib.by_id(film['id'])['year'] == 1995
+    win._detail_for([win.lib.by_id(film['id'])])
+    _type_year(win, '')                              # cleared with the keyboard
+    assert not win.lib.by_id(film['id']).get('year')
+    win._detail_for([win.lib.by_id(film['id'])])
+    _type_year(win, '19')                            # not a year: put back, and said
+    assert not win.lib.by_id(film['id']).get('year') and win.d_year.text() == ''
+    win._detail_for([win.lib.by_id(film['id'])])
+    _type_year(win, '1895')                          # an early film is a year
+    assert win.lib.by_id(film['id'])['year'] == 1895
+    win.hide()
+
+
+def test_removing_every_film_isnt_saved_as_offline(win, monkeypatch):
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    cid = win.lib.make_collection('Comedy', [i['id'] for i in films])
+    d = pa.CollectionDialog(win, win.lib, cid)
+    for _ in range(d.list.count()):
+        d.list.item(0).setSelected(True)
+        d._remove()
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    d._save()
+    assert 'Add at least one film' in told[-1] and cid in win.lib.data['collections']
+    d.deleteLater()
+
+
+def test_only_hidden_titles_left_says_so(win, monkeypatch):
+    for i in win.lib._items:
+        if not i['kids']:
+            win.lib.set_item(i['id'], hidden=True)
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    win.add_to_kids()
+    assert 'hidden' in told[-1]
