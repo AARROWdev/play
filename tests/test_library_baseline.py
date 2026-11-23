@@ -1298,3 +1298,44 @@ def test_a_link_to_a_moved_folder_keeps_its_titles(tmp_path):
     assert titles_now(lb) == ['Heat', 'Up']
     os.rename(str(media / 'Kids'), str(tmp_path / 'KidsMoved'))   # moved out: Cartoons now leads nowhere
     assert titles_now(lb) == ['Heat', 'Up']
+
+
+
+# ------------------------------------------------------------------ 42b0a45 review
+def test_a_copy_that_plays_beats_one_on_an_unplugged_drive(tmp_path):
+    usb, media, backup = tmp_path / 'USB', tmp_path / 'Media', tmp_path / 'Backup'
+    make(str(usb), 'Alien 1979.mkv')
+    make(str(backup), 'Alien 1979.mkv')
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'USB', usb)
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}, {'path': str(backup)}])
+    assert next(i for i in lb.items(0) if i['title'] == 'Alien')['copies'] == 2
+    os.rename(str(usb), str(tmp_path / 'unplugged'))
+    lb.scan()
+    alien = next(i for i in lb.current() if i['title'] == 'Alien')
+    assert alien['path'] == str(backup / 'Alien 1979.mkv') and os.path.exists(alien['path'])
+    assert not alien.get('copies')                  # the unplugged one isn't counted while it's away
+
+
+def test_a_failed_readlink_offline_keeps_the_remembered_target(tmp_path, monkeypatch):
+    nas = tmp_path / 'NAS'
+    make(str(nas), 'Alien 1979.mkv')
+    media = tmp_path / 'Media'
+    make(str(media), 'Heat 1995.mkv', b'heat' * 50)
+    _junction(media / 'Films', nas)
+    films = os.path.normcase(str(media / 'Films'))
+    lb = library.Library(str(tmp_path / 'store'))
+    lb.set_folders([{'path': str(media)}])
+    lb.items(0)
+    remembered = lb._links[films]
+    os.rename(str(nas), str(tmp_path / 'asleep'))
+    real_readlink = library.os.readlink
+
+    def readlink(p):
+        if os.path.normcase(str(p)) == films:
+            raise OSError('cannot read the link now')
+        return real_readlink(p)
+    monkeypatch.setattr(library.os, 'readlink', readlink)
+    lb.scan()
+    assert lb._links[films] == remembered
