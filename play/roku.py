@@ -24,25 +24,28 @@ import xml.etree.ElementTree as ET
 import zipfile
 from ctypes import wintypes
 
+from .server import home_address as lan_address   # one rule for "on the home network"
+
 ECP_PORT = 8060
 SSDP = ('239.255.255.250', 1900)
 DEV_USER = 'rokudev'
 APP_TITLE = 'PLAY'
 MAX_REPLY = 1 << 20          # a TV's answers are a few KB: anything bigger isn't one
 
-# TVs are reached directly, never through a proxy: on Windows an IP address on the home network isn't covered by
-# the proxy bypass list, so a system, VPN or office proxy would get the questions (and the password exchange)
-_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_HOME_NETWORKS = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+DEADLINE = 30               # seconds for a whole answer, however slowly it trickles in
 
 
-def lan_address(ip):
-    """Is ip an address on a home network (where a TV can be): 10.x, 172.16-31.x or 192.168.x?"""
-    try:
-        a = ipaddress.IPv4Address(str(ip))
-    except ValueError:
-        return False
-    return any(a in n for n in _HOME_NETWORKS)
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A TV answers where it was asked: a redirect (to another host, to this PC) is refused, not followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# TVs are reached directly, never through a proxy (on Windows an IP address on the home network isn't covered by
+# the proxy bypass list, so a system, VPN or office proxy would get the questions and the password exchange), and
+# never by a redirect
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
 def app_dir():
@@ -151,11 +154,20 @@ class Blocked(OSError):
     """The TV answered but refused: its "Control by mobile apps" setting is off (or Limited)."""
 
 
-def _read(r):
-    data = r.read(MAX_REPLY + 1)
-    if len(data) > MAX_REPLY:
-        raise OSError('The answer was too long to be from a TV')
-    return data
+def _read(r, deadline=DEADLINE):
+    """The whole answer, at most MAX_REPLY bytes and within `deadline` seconds (a reply that trickles in a byte at
+    a time would otherwise hold a worker, and the closed wizard, for good)."""
+    end, chunks, n = time.monotonic() + deadline, [], 0
+    while True:
+        if time.monotonic() > end:
+            raise OSError('The TV took too long to answer')
+        chunk = r.read1(65536) if hasattr(r, 'read1') else r.read(65536)
+        if not chunk:
+            return b''.join(chunks)
+        n += len(chunk)
+        if n > MAX_REPLY:
+            raise OSError('The answer was too long to be from a TV')
+        chunks.append(chunk)
 
 
 def _get(url, timeout=4):
@@ -204,12 +216,34 @@ class WrongPassword(OSError):
 
 
 class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
-    """Digest auth with one try: a second refusal is the wrong password (not five more uploads of the app)."""
+    """Digest auth with one try: a refusal of the password is the wrong password (not five more uploads of the
+    app). The one exception is a "stale" nonce (the TV wants a fresh one, the password was fine): one retry."""
 
     def http_error_401(self, req, fp, code, msg, headers):
         if req.unredirected_hdrs.get('Authorization'):
-            raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+            stale = 'stale=true' in (headers.get('WWW-Authenticate') or '').replace(' ', '').lower()
+            if not stale or getattr(req, '_play_stale_retry', False):
+                raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+            req._play_stale_retry = True
         return super().http_error_401(req, fp, code, msg, headers)
+
+
+def _authorization(handler, url, timeout):
+    """The Authorization header for a POST to url, from a challenge fetched with a small GET first (so the app
+    itself is uploaded once). None when the TV didn't challenge (or answered something else)."""
+    try:
+        with _DIRECT.open(urllib.request.Request(url, method='GET'), timeout=timeout) as r:
+            _read(r)
+        return None                                  # no password asked: nothing to add
+    except urllib.error.HTTPError as e:
+        chal = e.headers.get('WWW-Authenticate') or ''
+        e.close()
+        if e.code != 401 or not chal.lower().startswith('digest '):
+            return None
+    req = urllib.request.Request(url, method='POST')
+    keqv = urllib.request.parse_keqv_list(urllib.request.parse_http_list(chal[7:]))
+    auth = handler.get_authorization(req, keqv)
+    return f'Digest {auth}' if auth else None
 
 
 def _multipart(fields, files):
@@ -232,12 +266,16 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     url = f'http://{ip}:{port}/plugin_install' if port != 80 else f'http://{ip}/plugin_install'
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, url, DEV_USER, password)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _OnceDigest(pm))
+    handler = _OnceDigest(pm)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), handler)
     body, ctype = _multipart({'mysubmit': 'Install'}, {'archive': ('PLAY-roku.zip', zip_bytes, 'application/zip')})
     req = urllib.request.Request(url, data=body, headers={'Content-Type': ctype}, method='POST')
+    auth = _authorization(handler, url, min(timeout, 15))
+    if auth:
+        req.add_unredirected_header('Authorization', auth)
     try:
         with opener.open(req, timeout=timeout) as r:
-            text = _read(r).decode('utf-8', 'replace')
+            text = _read(r, timeout).decode('utf-8', 'replace')
     except urllib.error.HTTPError as e:
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e
@@ -245,7 +283,8 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
     msg = ' '.join(m.strip() for m in msgs if m.strip())
     low = msg.lower()
-    if 'success' in low or 'identical' in low:
+    if not re.search(r'\b(fail|failure|failed|error|unsuccessful)', low) and \
+            re.search(r'\b(success|identical)\b', low):
         return msg
     raise OSError(msg or 'The TV answered in a way PLAY doesn\'t recognise')
 

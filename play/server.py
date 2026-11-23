@@ -73,7 +73,7 @@ def _find_lan_ips():
     ips = []
     for ip in found:
         a = ipaddress.ip_address(ip)
-        if a.is_private and not a.is_loopback and not a.is_link_local and a not in ipaddress.ip_network('100.64.0.0/10'):
+        if home_address(a):
             ips.append(ip)
     primary = _default_route_ip()                     # the adapter the PC goes out on (home, unless a VPN is up)
     # the default route first (the home network, or with a full-tunnel VPN the VPN); then the other addresses
@@ -87,6 +87,19 @@ def _find_lan_ips():
 
 
 HOTSPOT_IP = '192.168.137.1'                         # Windows Mobile Hotspot / Internet Connection Sharing
+
+
+_HOME_NETWORKS = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+
+
+def home_address(ip):
+    """Is ip an IPv4 address on a home network (where this PC and its TVs are): 10.x, 172.16-31.x or 192.168.x?
+    Not loopback, link-local, Tailscale/CGNAT (100.64/10) or the other ranges Python calls private."""
+    try:
+        a = ipaddress.IPv4Address(str(ip))
+    except ValueError:
+        return False
+    return any(a in n for n in _HOME_NETWORKS)
 
 
 def _default_route_ip():

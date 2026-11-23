@@ -10,7 +10,6 @@ import getpass
 import os
 import re
 import sys
-import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, 'roku')
@@ -18,12 +17,11 @@ OUT = os.path.join(ROOT, 'dist', 'PLAY-roku.zip')
 
 
 def build():
+    sys.path.insert(0, ROOT)
+    from play import roku                    # the same package Set up TVs installs
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(APP):
-            for f in sorted(files):
-                p = os.path.join(root, f)
-                z.write(p, os.path.relpath(p, APP).replace(os.sep, '/'))
+    with open(OUT, 'wb') as f:
+        f.write(roku.package(APP))
     print('built', OUT)
 
 

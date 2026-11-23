@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
 
 from play import library, roku, tvsetup  # noqa: E402
@@ -52,19 +53,28 @@ class FakeInstaller(BaseHTTPRequestHandler):
     password = 'secret'
     received = []
     attempts = 0
+    uploads = 0                   # POSTs that carried the app
+    stale_once = False            # answer the first good password with "stale nonce" (a fresh one is wanted)
+    nonce = 'n0nce'
     reply = b'<script>var m = [{"text":"Application Received: 1 bytes stored."},{"text":"Install Success."}]</script>'
 
     def log_message(self, *a):
         pass
 
-    def _challenge(self):
+    def _challenge(self, stale=False):
         self.send_response(401)
-        self.send_header('WWW-Authenticate', 'Digest realm="rokudev", nonce="n0nce", qop="auth"')
+        self.send_header('WWW-Authenticate', f'Digest realm="rokudev", nonce="{FakeInstaller.nonce}", qop="auth"'
+                         + (', stale=true' if stale else ''))
         self.send_header('Content-Length', '0')
         self.end_headers()
 
+    def do_GET(self):
+        self._challenge()
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        if b'ZIP' in body:
+            FakeInstaller.uploads += 1
         auth = self.headers.get('Authorization') or ''
         if not auth.startswith('Digest '):
             return self._challenge()
@@ -76,6 +86,11 @@ class FakeInstaller(BaseHTTPRequestHandler):
         want = md5(f"{ha1}:{p['nonce']}:{p['nc']}:{p['cnonce']}:{p['qop']}:{ha2}")
         if p.get('username') != 'rokudev' or p.get('response') != want:
             return self._challenge()
+        if FakeInstaller.stale_once:
+            FakeInstaller.stale_once, FakeInstaller.nonce = False, 'n0nce2'
+            return self._challenge(stale=True)
+        if p['nonce'] != FakeInstaller.nonce:
+            return self._challenge()
         FakeInstaller.received.append(body)
         out = FakeInstaller.reply
         self.send_response(200)
@@ -86,7 +101,8 @@ class FakeInstaller(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def tv():
-    FakeInstaller.received, FakeInstaller.attempts = [], 0
+    FakeInstaller.received, FakeInstaller.attempts, FakeInstaller.uploads = [], 0, 0
+    FakeInstaller.stale_once, FakeInstaller.nonce = False, 'n0nce'
     FakeInstaller.reply = b'<script>var m = [{"text":"Install Success."}]</script>'
     srv = ThreadingHTTPServer(('127.0.0.1', 0), FakeInstaller)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -109,8 +125,11 @@ def test_a_wrong_password_is_reported_as_such(tv):
 
 def test_the_package_is_the_tv_app():
     z = zipfile.ZipFile(io.BytesIO(roku.package()))
-    names = z.namelist()
-    assert 'manifest' in names and any(n.startswith('components/') for n in names)
+    assert sorted(z.namelist()) == [
+        'components/DiscoverTask.brs', 'components/DiscoverTask.xml', 'components/LoadTask.brs',
+        'components/LoadTask.xml', 'components/MainScene.brs', 'components/MainScene.xml', 'images/icon.png',
+        'images/icon_fhd.png', 'images/icon_hd.png', 'images/icon_sd.png', 'images/splash.png', 'manifest',
+        'source/main.brs']
     assert roku.app_version() == '1.0.0'
 
 
@@ -380,3 +399,131 @@ def test_closing_mid_install_still_keeps_the_password(qapp, tmp_path, monkeypatc
     assert shiboken6.isValid(d)                                             # kept until the install is done
     gate.set()
     wait_for(lambda: lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'})
+
+
+
+# ------------------------------------------------------------------ 347f657 review
+class FakeEcp(BaseHTTPRequestHandler):
+    redirect = False
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if FakeEcp.redirect:
+            self.send_response(302)
+            self.send_header('Location', 'http://127.0.0.1:9/elsewhere')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        out = b'<device-info><serial-number>X1</serial-number></device-info>'
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+@pytest.fixture
+def ecp():
+    FakeEcp.redirect = False
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), FakeEcp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f'http://127.0.0.1:{srv.server_address[1]}/query/device-info'
+    srv.shutdown()
+
+
+def test_the_app_is_uploaded_once(tv):
+    assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIPDATA', port=tv)
+    assert FakeInstaller.uploads == 1
+
+
+def test_a_stale_nonce_is_retried_not_taken_as_a_wrong_password(tv):
+    FakeInstaller.stale_once = True
+    assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIPDATA', port=tv)
+
+
+def test_a_failure_message_is_a_failure(tv):
+    for reply in (b'"text":"Install unsuccessful"', b'"text":"Install Failure: success not reached"'):
+        FakeInstaller.reply = reply
+        with pytest.raises(OSError):
+            roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_questions_go_direct_and_dont_follow_redirects(ecp, monkeypatch):
+    monkeypatch.setenv('HTTP_PROXY', 'http://127.0.0.1:9')
+    monkeypatch.setenv('NO_PROXY', '')
+    assert b'X1' in roku._get(ecp)                                            # no proxy
+    FakeEcp.redirect = True
+    with pytest.raises(OSError):
+        roku._get(ecp)                                                        # a redirect isn't followed
+
+
+def test_an_answer_that_trickles_in_is_cut_off(monkeypatch):
+    clock = iter(range(0, 1000, 5))
+    monkeypatch.setattr(roku.time, 'monotonic', lambda: next(clock))
+
+    class Drip:
+        def read1(self, n):
+            return b'x'
+    with pytest.raises(OSError):
+        roku._read(Drip(), deadline=30)
+
+
+def test_the_replace_question_is_plain_text(qapp, monkeypatch):
+    seen = []
+
+    def exec_(box):
+        seen.append(box.textFormat())
+        return QMessageBox.No
+    monkeypatch.setattr(QMessageBox, 'exec', exec_)
+    assert tvsetup.confirm(None, '<b>Other</b>') is False
+    assert seen == [Qt.PlainText]
+
+
+def test_after_installing_the_app_is_known(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
+                                                                    'app': None, 'password': 'pw'}})
+    monkeypatch.setattr(tvsetup, 'confirm', lambda *a: True)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
+    asked = []
+    monkeypatch.setattr(tvsetup, 'confirm', lambda *a: asked.append(1) or True)
+    d.install_current()                                                     # Reinstall: PLAY is known to be there
+    wait_for(lambda: len(net.installs) == 2)
+    assert asked == []
+
+
+def test_add_by_address_leaves_an_installing_tv_alone(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
+                                                                    'app': ('', '')}})
+    d.tv['10.0.0.6']['status'] = tvsetup.INSTALLING
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('10.0.0.6', True))
+    d.add_by_address()
+    assert d.tv['10.0.0.6']['status'] == tvsetup.INSTALLING
+    warned = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *a: warned.append(a))
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('8.8.8.8', True))
+    d.add_by_address()                                                      # not a home-network address
+    assert warned and '8.8.8.8' not in d.tv
+
+
+def test_a_closed_wizard_checks_nothing_new(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {})
+    d.release()
+    d._found(['10.0.0.6'])
+    assert d.tv == {}
+
+
+def test_old_password_keys_are_dropped(qapp, tmp_path, monkeypatch):
+    (tmp_path / 'library.json').write_text('{"tv_passwords": {"SER-10.0.0.6": "enc:x", "SER-10.0.0.6@10.0.0.5": '
+                                           '"enc:old"}}', encoding='utf-8')
+    assert library.Library(str(tmp_path)).data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.5': 'enc:old'}
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
+                                                                    'app': ('', ''), 'password': 'pw'}})
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
+    assert lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}    # the TV's old address is gone

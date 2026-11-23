@@ -137,15 +137,15 @@ class TvSetupDialog(QDialog):
 
     def _worker_done(self):
         self.active -= 1
-        if self.closing and not self.active:
-            self.deleteLater()
 
     def release(self):
-        """Closed: delete the dialog once its workers are done (an install keeps running and still saves the
-        password it was given)."""
+        """Closed. The window keeps this one dialog and opens it again (an install still running finishes, keeps
+        its password, and shows when it's opened again); nothing new is checked meanwhile."""
         self.closing = True
-        if not self.active:
-            self.deleteLater()
+
+    def reopen(self):
+        self.closing = False
+        self.search()
 
     def installing(self):
         return any(t['status'] == INSTALLING for t in self.tv.values())
@@ -169,6 +169,8 @@ class TvSetupDialog(QDialog):
     def _found(self, ips):
         self.searching = False
         self.again.setEnabled(True)
+        if self.closing:
+            return
         for ip in ips:
             if self.tv.get(ip, {}).get('status') != INSTALLING:
                 self._check(ip)
@@ -288,9 +290,12 @@ class TvSetupDialog(QDialog):
         try:
             ip = str(ipaddress.IPv4Address(text))
         except ValueError:
-            QMessageBox.warning(self, 'Set up TVs', f'"{text}" isn\'t an IP address, like 192.168.1.50.')
+            ip = None
+        if not ip or not roku.lan_address(ip):
+            QMessageBox.warning(self, 'Set up TVs', f'"{text}" isn\'t a home-network address, like 192.168.1.50.')
             return
-        self._check(ip)
+        if self.tv.get(ip, {}).get('status') != INSTALLING:
+            self._check(ip)
         self.list.setCurrentItem(self._item(ip))
 
     def _key(self, ip):
@@ -341,6 +346,7 @@ class TvSetupDialog(QDialog):
         try:
             st['msg'] = self.net.install(ip, pw, self.net.package())
             st['status'] = DONE
+            st['app'] = (roku.APP_TITLE, roku.app_version())   # what's on the TV now
             st['pw'] = pw
         except roku.WrongPassword:
             st['status'], st['wrong'] = FAILED, True
@@ -358,6 +364,9 @@ def _after_install(dlg, ip, st):
     if not key:
         return
     pws = dict(dlg.lib.data['tv_passwords'])
+    serial = key.rsplit('@', 1)[0]
+    for k in [k for k in pws if k != key and k.rsplit('@', 1)[0] == serial]:
+        del pws[k]                                  # the same TV at an address it had before
     if st.get('pw'):
         if not pws.get(key) or dlg.net.unprotect(pws[key]) != st['pw']:
             try:

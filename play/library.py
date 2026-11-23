@@ -216,8 +216,8 @@ class Library:
             'unreadable_since': {k: t for k, v in _dict(d.get('unreadable_since')).items()
                                  if isinstance(k, str) and (t := _finite(v)) is not None},
             # TV serial -> its developer password, encrypted for this Windows user (Set up TVs)
-            'tv_passwords': {k: v for k, v in _dict(d.get('tv_passwords')).items()
-                             if isinstance(k, str) and isinstance(v, str)},
+            'tv_passwords': {k: v for k, v in _dict(d.get('tv_passwords')).items()      # serial@address only
+                             if isinstance(k, str) and isinstance(v, str) and '@' in k},
             # set once the installed PLAY has turned on "Start with Windows" (switching it off later sticks)
             # (v1.0 is the first public build, so a library.json without the flag comes from before the flag;
             # its user already chose, and a broken file still means "not a first start")

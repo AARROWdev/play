@@ -882,11 +882,15 @@ class Window(QMainWindow):
     def open_tv_setup(self):
         from .tvsetup import TvSetupDialog
         self.bring_up()
-        d = TvSetupDialog(self, self.lib, self.srv)
+        d = getattr(self, '_tv_setup', None)
+        if d is None:                                  # one per window: reopening shows an install still running
+            d = self._tv_setup = TvSetupDialog(self, self.lib, self.srv)
+        else:
+            d.reopen()
         try:
             d.exec()
         finally:
-            d.release()                                # deleted once its searches and installs are done
+            d.release()
 
     def open_settings(self, first_run=False):
         d = SettingsDialog(self, self.lib, first_run)
