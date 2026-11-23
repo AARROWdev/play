@@ -4,7 +4,7 @@ import html
 import ipaddress
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
                                QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
@@ -56,6 +56,18 @@ def newer(a, b):
 class _Bus(QObject):
     tvs = Signal(object)          # the addresses found
     state = Signal(str, object)   # ip, {...}
+    idle = Signal()               # a worker finished
+
+
+def confirm(parent, text):
+    """Yes/No, with the text shown as plain text (it can hold what a device on the network says about itself)."""
+    box = QMessageBox(QMessageBox.Question, 'Set up TVs', text, QMessageBox.Yes | QMessageBox.No, parent)
+    box.setTextFormat(Qt.PlainText)
+    box.setDefaultButton(QMessageBox.No)
+    try:
+        return box.exec() == QMessageBox.Yes
+    finally:
+        box.deleteLater()
 
 
 class TvSetupDialog(QDialog):
@@ -66,9 +78,12 @@ class TvSetupDialog(QDialog):
         self.resize(720, 440)
         self.tv = {}                                   # ip -> {'status', 'info', 'app', 'msg'}
         self.searching = False
+        self.active = 0                                # workers still running (the dialog outlives them)
+        self.closing = False
         self.bus = _Bus(self)
         self.bus.tvs.connect(self._found)
         self.bus.state.connect(self._set)
+        self.bus.idle.connect(self._worker_done)
 
         v = QVBoxLayout(self)
         intro = QLabel('PLAY looks for Roku TVs on your network and puts the PLAY app on them. '
@@ -111,10 +126,32 @@ class TvSetupDialog(QDialog):
 
     # ------------------------------------------------------------------ finding and checking
     def _run(self, fn, *args):
-        threading.Thread(target=fn, args=args, daemon=True).start()
+        self.active += 1
+
+        def run():
+            try:
+                fn(*args)
+            finally:
+                self.bus.idle.emit()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _worker_done(self):
+        self.active -= 1
+        if self.closing and not self.active:
+            self.deleteLater()
+
+    def release(self):
+        """Closed: delete the dialog once its workers are done (an install keeps running and still saves the
+        password it was given)."""
+        self.closing = True
+        if not self.active:
+            self.deleteLater()
+
+    def installing(self):
+        return any(t['status'] == INSTALLING for t in self.tv.values())
 
     def search(self):
-        if self.searching:
+        if self.searching or self.installing():
             return
         self.searching = True
         self.again.setEnabled(False)
@@ -125,7 +162,7 @@ class TvSetupDialog(QDialog):
     def _search_worker(self, local, known):
         try:
             found = self.net.find(local, known)
-        except OSError:
+        except Exception:
             found = list(known)
         self.bus.tvs.emit(found)
 
@@ -133,7 +170,8 @@ class TvSetupDialog(QDialog):
         self.searching = False
         self.again.setEnabled(True)
         for ip in ips:
-            self._check(ip)
+            if self.tv.get(ip, {}).get('status') != INSTALLING:
+                self._check(ip)
         self._details()
 
     def _check(self, ip):
@@ -145,11 +183,6 @@ class TvSetupDialog(QDialog):
         st = {'info': None, 'app': None, 'msg': ''}
         try:
             st['info'] = self.net.info(ip)
-        except roku.Blocked:
-            st['status'] = BLOCKED
-        except Exception:                               # nothing there, or not a Roku
-            st['status'] = OFFLINE
-        else:
             if not st['info']['dev_mode']:
                 st['status'] = NO_DEV
             else:
@@ -159,20 +192,34 @@ class TvSetupDialog(QDialog):
                     st['status'] = OLDER if newer(roku.app_version(), app[1]) else INSTALLED
                 elif app and app[0]:
                     st['status'] = OTHER
-                elif app is None and talks_to_play:     # the TV won't list its apps, but PLAY's app is on it
-                    st['status'] = INSTALLED
+                elif app is None and talks_to_play:     # the TV won't list its apps, but PLAY's app plays on it
+                    st['status'] = INSTALLED            # (app stays unknown: installing still asks first)
                 else:
                     st['status'] = READY
+        except roku.Blocked:
+            st['status'] = BLOCKED
+        except Exception:                               # nothing there, not a Roku, or a garbled answer
+            st['status'] = OFFLINE
         self.bus.state.emit(ip, st)
 
     def _set(self, ip, st):
-        if 'pw' in st or 'wrong' in st:
+        wrong = st.get('wrong')
+        if 'pw' in st or wrong:
             _after_install(self, ip, st)
             st = {k: v for k, v in st.items() if k not in ('pw', 'wrong')}
         cur = self.tv.setdefault(ip, {'status': CHECKING, 'info': None, 'app': None, 'msg': ''})
         cur.update(st)
         self._row(ip)
         self._details()
+        if wrong and not self.closing:                  # ask again, once
+            QTimer.singleShot(0, lambda: self._retry(ip))
+
+    def _retry(self, ip):
+        if self.closing or self.tv.get(ip, {}).get('status') != FAILED:
+            return
+        pw = self._password(ip, retry=True)
+        if pw is not None:
+            self._start_install(ip, pw)
 
     # ------------------------------------------------------------------ the list and the details
     def _item(self, ip):
@@ -230,6 +277,7 @@ class TvSetupDialog(QDialog):
         labels = {INSTALLED: 'Reinstall', OLDER: 'Update this TV', DONE: 'Reinstall'}
         self.go.setText(labels.get(s, 'Install on this TV'))
         self.go.setEnabled(s in (READY, OTHER, INSTALLED, OLDER, BLOCKED, DONE, FAILED))
+        self.again.setEnabled(not self.searching and not self.installing())
 
     # ------------------------------------------------------------------ adding and installing
     def add_by_address(self):
@@ -246,10 +294,15 @@ class TvSetupDialog(QDialog):
         self.list.setCurrentItem(self._item(ip))
 
     def _key(self, ip):
-        return (self.tv[ip].get('info') or {}).get('serial') or ip
+        """The stored password's key: the TV's serial and its address together, so a device that copies a serial
+        or later gets the address is asked for the password, not handed it. None (nothing stored) when the TV
+        didn't say its serial."""
+        serial = (self.tv[ip].get('info') or {}).get('serial')
+        return f'{serial}@{ip}' if serial and serial != ip else None
 
     def _password(self, ip, retry=False):
-        stored = self.lib.data['tv_passwords'].get(self._key(ip))
+        key = self._key(ip)
+        stored = self.lib.data['tv_passwords'].get(key) if key else None
         if stored and not retry:
             pw = self.net.unprotect(stored)
             if pw:
@@ -264,11 +317,13 @@ class TvSetupDialog(QDialog):
         if not ip:
             return
         t = self.tv[ip]
+        if t['status'] == INSTALLING:
+            return
         app = t.get('app')
-        if t['status'] == OTHER or (app is None and t['status'] in (BLOCKED, READY)):
+        if t['status'] == OTHER or app is None:         # another app, or the TV won't say which: ask first
             other = f'"{app[0]}"' if app and app[0] else 'any other developer app'
-            if QMessageBox.question(self, 'Set up TVs', f'A Roku holds one developer app at a time. Installing PLAY '
-                                    f'replaces {other} on this TV. Go ahead?') != QMessageBox.Yes:
+            if not confirm(self, f'A Roku holds one developer app at a time. Installing PLAY replaces {other} on '
+                                 f'this TV. Go ahead?'):
                 return
         pw = self._password(ip)
         if pw is None:
@@ -296,14 +351,19 @@ class TvSetupDialog(QDialog):
 
 
 def _after_install(dlg, ip, st):
-    """What an install result means for the stored password (called on the GUI thread)."""
+    """What an install result means for the stored password (called on the GUI thread): a password that worked is
+    kept (encrypted; saved only when it's new), a refused one is forgotten. Not kept for a TV that didn't say its
+    serial."""
     key = dlg._key(ip)
+    if not key:
+        return
     pws = dict(dlg.lib.data['tv_passwords'])
     if st.get('pw'):
-        try:
-            pws[key] = dlg.net.protect(st.pop('pw'))
-        except OSError:
-            pass
+        if not pws.get(key) or dlg.net.unprotect(pws[key]) != st['pw']:
+            try:
+                pws[key] = dlg.net.protect(st['pw'])
+            except OSError:
+                pass
     elif st.get('wrong'):
         pws.pop(key, None)
     if pws != dlg.lib.data['tv_passwords']:

@@ -25,23 +25,34 @@ def qapp():
 @pytest.fixture(autouse=True)
 def never_a_real_tv(monkeypatch):
     """No test here may reach a real TV: searching the network, asking a TV, or installing anywhere but this PC's
-    own fake installer fails the test."""
-    def refuse(*a, **k):
-        raise AssertionError(f'a test tried to reach the network: {a}')
-    for name in ('find', 'info', 'dev_app', 'launch', '_ssdp_once'):
-        monkeypatch.setattr(roku, name, refuse)
+    own fake installer fails the test, also when it happens in a worker thread (checked at the end)."""
+    tried = []
+
+    def refuse(name):
+        def f(*a, **k):
+            tried.append((name, a))
+            raise AssertionError(f'a test tried to reach the network: {name}{a}')
+        return f
+    for name in ('find', 'info', 'dev_app', '_ssdp_once'):
+        monkeypatch.setattr(roku, name, refuse(name))
     real_install = roku.install
 
     def install(ip, *a, **k):
-        assert ip == '127.0.0.1', f'a test tried to install on {ip}'
+        if ip != '127.0.0.1':
+            tried.append(('install', ip))
+            raise AssertionError(f'a test tried to install on {ip}')
         return real_install(ip, *a, **k)
     monkeypatch.setattr(roku, 'install', install)
+    yield
+    assert not tried, f'reached for the network: {tried}'
 
 
 # ------------------------------------------------------------------ a fake Roku developer installer (digest auth)
 class FakeInstaller(BaseHTTPRequestHandler):
     password = 'secret'
     received = []
+    attempts = 0
+    reply = b'<script>var m = [{"text":"Application Received: 1 bytes stored."},{"text":"Install Success."}]</script>'
 
     def log_message(self, *a):
         pass
@@ -57,6 +68,7 @@ class FakeInstaller(BaseHTTPRequestHandler):
         auth = self.headers.get('Authorization') or ''
         if not auth.startswith('Digest '):
             return self._challenge()
+        FakeInstaller.attempts += 1
         p = dict(re.findall(r'(\w+)="?([^",]+)"?', auth[7:]))
         md5 = lambda s: hashlib.md5(s.encode()).hexdigest()  # noqa: E731
         ha1 = md5(f"{p['username']}:rokudev:{self.password}")
@@ -65,7 +77,7 @@ class FakeInstaller(BaseHTTPRequestHandler):
         if p.get('username') != 'rokudev' or p.get('response') != want:
             return self._challenge()
         FakeInstaller.received.append(body)
-        out = b'<script>var m = [{"text":"Application Received: 1 bytes stored."},{"text":"Install Success."}]</script>'
+        out = FakeInstaller.reply
         self.send_response(200)
         self.send_header('Content-Length', str(len(out)))
         self.end_headers()
@@ -74,7 +86,8 @@ class FakeInstaller(BaseHTTPRequestHandler):
 
 @pytest.fixture
 def tv():
-    FakeInstaller.received = []
+    FakeInstaller.received, FakeInstaller.attempts = [], 0
+    FakeInstaller.reply = b'<script>var m = [{"text":"Install Success."}]</script>'
     srv = ThreadingHTTPServer(('127.0.0.1', 0), FakeInstaller)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield srv.server_address[1]
@@ -214,7 +227,7 @@ def test_install_asks_for_the_password_once_and_remembers_it(qapp, tmp_path, mon
     d.install_current()
     wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
     assert net.installs == [('10.0.0.6', 'pw')] and len(asked) == 1
-    assert library.Library(lib.dir).data['tv_passwords'] == {'SER-10.0.0.6': 'enc:pw'}
+    assert library.Library(lib.dir).data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'}
     d.install_current()                                                     # again: no question this time
     wait_for(lambda: len(net.installs) == 2)
     assert len(asked) == 1
@@ -223,22 +236,37 @@ def test_install_asks_for_the_password_once_and_remembers_it(qapp, tmp_path, mon
 def test_a_wrong_password_is_forgotten(qapp, tmp_path, monkeypatch):
     d, lib, net = dialog(qapp, tmp_path, monkeypatch,
                          {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'new'}})
-    lib.set_value('tv_passwords', {'SER-10.0.0.6': 'enc:old'})
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:old'})
+    asked = []
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: asked.append(a[2]) or ('', False))   # cancel
     select(d, '10.0.0.6')
     d.install_current()
-    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED)
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.FAILED and asked)
     assert 'password' in d.detail.text() and lib.data['tv_passwords'] == {}
+    assert "didn't work" in asked[0]                                        # asked again, once
+
+
+def test_a_wrong_password_can_be_typed_again(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch,
+                         {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'new'}})
+    answers = iter([('old', True), ('new', True)])
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: next(answers))
+    select(d, '10.0.0.6')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.6']['status'] == tvsetup.DONE)
+    assert net.installs == [('10.0.0.6', 'new')]
 
 
 def test_replacing_another_developer_app_asks_first(qapp, tmp_path, monkeypatch):
     d, lib, net = dialog(qapp, tmp_path, monkeypatch,
                          {'10.0.0.8': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('Other', '2.0')}})
-    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.No)
+    asked = []
+    monkeypatch.setattr(tvsetup, 'confirm', lambda parent, text: asked.append(text) or False)
     monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
     select(d, '10.0.0.8')
     d.install_current()
     QApplication.processEvents()
-    assert net.installs == []
+    assert net.installs == [] and '"Other"' in asked[0]
 
 
 def test_add_by_address(qapp, tmp_path, monkeypatch):
@@ -253,3 +281,102 @@ def test_add_by_address(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('living room', True))
     d.add_by_address()
     assert warned and len(d.tv) == 1
+
+
+
+# ------------------------------------------------------------------ 49232b5 review
+def test_a_garbled_answer_doesnt_leave_a_tv_checking(qapp, tmp_path, monkeypatch):
+    import http.client
+
+    class Garbled(FakeNet):
+        def dev_app(self, ip):
+            raise http.client.BadStatusLine('garbage')
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    net = Garbled({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}}})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') not in (None, tvsetup.CHECKING))
+    assert d.tv['10.0.0.6']['status'] == tvsetup.OFFLINE
+
+
+def test_ssdp_answers_are_only_trusted_from_where_they_came():
+    reply = b'HTTP/1.1 200 OK\r\nST: roku:ecp\r\nLOCATION: http://%s:8060/\r\n\r\n'
+    assert roku.ssdp_reply_ok(reply % b'192.168.1.50', '192.168.1.50')
+    assert not roku.ssdp_reply_ok(reply % b'203.0.113.9', '192.168.1.50')       # points somewhere else
+    assert not roku.ssdp_reply_ok(reply % b'203.0.113.9', '203.0.113.9')        # not a home network
+    assert not roku.ssdp_reply_ok(b'HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\n\r\n', '192.168.1.50')
+    assert not roku.lan_address('100.100.1.1') and not roku.lan_address('127.0.0.1')
+
+
+def test_install_never_goes_through_a_proxy(tv, monkeypatch):
+    monkeypatch.setenv('HTTP_PROXY', 'http://127.0.0.1:9')                     # a proxy that isn't there
+    monkeypatch.setenv('NO_PROXY', '')
+    assert 'Install Success' in roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_a_wrong_password_is_tried_once(tv):
+    with pytest.raises(roku.WrongPassword):
+        roku.install('127.0.0.1', 'nope', b'ZIP', port=tv)
+    assert FakeInstaller.attempts == 1                                          # not five more uploads
+
+
+def test_an_answer_that_isnt_a_success_isnt_one(tv):
+    FakeInstaller.reply = b'<html>something else</html>'
+    with pytest.raises(OSError):
+        roku.install('127.0.0.1', 'secret', b'ZIP', port=tv)
+
+
+def test_the_password_is_bound_to_the_tv_and_its_address(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch,
+                         {'10.0.0.7': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'x'}})
+    lib.set_value('tv_passwords', {'SER-10.0.0.6@10.0.0.6': 'enc:pw'})      # another address (or a copied serial)
+    asked = []
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: asked.append(1) or ('', False))
+    select(d, '10.0.0.7')
+    d.install_current()
+    assert asked and net.installs == []                                     # asked, not sent
+
+
+def test_no_password_is_kept_for_a_tv_that_didnt_say_its_serial(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.9': {'info': {}, 'blocked': True, 'password': 'pw'}})
+    monkeypatch.setattr(tvsetup, 'confirm', lambda *a: True)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.9')
+    d.install_current()
+    wait_for(lambda: d.tv['10.0.0.9']['status'] == tvsetup.DONE)
+    assert lib.data['tv_passwords'] == {}
+
+
+def test_reinstalling_where_the_app_is_unknown_asks_first(qapp, tmp_path, monkeypatch):
+    d, lib, net = dialog(qapp, tmp_path, monkeypatch, {'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True},
+                                                                    'app': None}}, served=['10.0.0.6'])
+    assert d.tv['10.0.0.6']['status'] == tvsetup.INSTALLED
+    asked = []
+    monkeypatch.setattr(tvsetup, 'confirm', lambda parent, text: asked.append(text) or False)
+    select(d, '10.0.0.6')
+    d.install_current()
+    assert asked and net.installs == []
+
+
+def test_closing_mid_install_still_keeps_the_password(qapp, tmp_path, monkeypatch):
+    import shiboken6
+    gate = threading.Event()
+
+    class Slow(FakeNet):
+        def install(self, ip, pw, data):
+            gate.wait(5)
+            return super().install(ip, pw, data)
+    monkeypatch.setattr(tvsetup.server, 'lan_ips', lambda: ['10.0.0.2'])
+    lib = library.Library(str(tmp_path))
+    net = Slow({'10.0.0.6': {'info': {'name': 'TV', 'dev_mode': True}, 'app': ('', ''), 'password': 'pw'}})
+    d = tvsetup.TvSetupDialog(None, lib, FakeServer(), net=net)
+    wait_for(lambda: d.tv.get('10.0.0.6', {}).get('status') == tvsetup.READY)
+    monkeypatch.setattr(QInputDialog, 'getText', lambda *a, **k: ('pw', True))
+    select(d, '10.0.0.6')
+    d.install_current()
+    assert not d.again.isEnabled()                                          # no search while installing
+    d.release()                                                             # closed mid-install
+    QApplication.processEvents()
+    assert shiboken6.isValid(d)                                             # kept until the install is done
+    gate.set()
+    wait_for(lambda: lib.data['tv_passwords'] == {'SER-10.0.0.6@10.0.0.6': 'enc:pw'})

@@ -4,16 +4,18 @@ Everything here is standard library only, so the installed PLAY needs nothing ex
   find()          SSDP search (what Roku's own phone app does) plus any addresses PLAY already knows
   info(ip)        the TV's name, model, serial, and whether Developer Mode is on (ECP, port 8060)
   dev_app(ip)     the developer app on it now, if any (a Roku holds one at a time)
-  install(...)    upload the TV app to the TV's developer installer (port 80, user 'rokudev')
+  install(...)    upload the TV app to the TV's developer installer (port 80, user 'rokudev', one try)
   protect/unprotect   keep a TV's developer password encrypted for this Windows user (DPAPI)
 """
 import base64
 import ctypes
 import io
+import ipaddress
 import os
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,9 +28,21 @@ ECP_PORT = 8060
 SSDP = ('239.255.255.250', 1900)
 DEV_USER = 'rokudev'
 APP_TITLE = 'PLAY'
+MAX_REPLY = 1 << 20          # a TV's answers are a few KB: anything bigger isn't one
 
-# the remote-control steps that turn Developer Mode on (Roku's own sequence)
-DEV_MODE_KEYS = 'Home, Home, Home, Up, Up, Right, Left, Right, Left, Right'
+# TVs are reached directly, never through a proxy: on Windows an IP address on the home network isn't covered by
+# the proxy bypass list, so a system, VPN or office proxy would get the questions (and the password exchange)
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_HOME_NETWORKS = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+
+
+def lan_address(ip):
+    """Is ip an address on a home network (where a TV can be): 10.x, 172.16-31.x or 192.168.x?"""
+    try:
+        a = ipaddress.IPv4Address(str(ip))
+    except ValueError:
+        return False
+    return any(a in n for n in _HOME_NETWORKS)
 
 
 def app_dir():
@@ -50,26 +64,46 @@ def app_version(folder=None):
     return '.'.join(v.get(k, '0') for k in ('major_version', 'minor_version', 'build_version'))
 
 
+# what the TV app is made of: anything else in the folder (dotfiles, a stray zip) stays out of the package
+_APP_FILES = {'source': ('.brs',), 'components': ('.brs', '.xml'), 'images': ('.png', '.jpg')}
+
+
 def package(folder=None):
-    """The TV app as a zip, built in memory from its source folder."""
+    """The TV app as a zip, built in memory from its source folder (the manifest, source and components code,
+    images)."""
     folder = folder or app_dir()
     if not os.path.isfile(os.path.join(folder, 'manifest')):
         raise OSError(f'The TV app is missing from this copy of PLAY ({folder})')
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(folder):
-            for name in sorted(files):
-                p = os.path.join(root, name)
-                z.write(p, os.path.relpath(p, folder).replace(os.sep, '/'))
+        z.write(os.path.join(folder, 'manifest'), 'manifest')
+        for top, exts in _APP_FILES.items():
+            for root, dirs, files in os.walk(os.path.join(folder, top)):
+                dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+                for name in sorted(files):
+                    if not name.startswith('.') and os.path.splitext(name)[1].lower() in exts:
+                        p = os.path.join(root, name)
+                        z.write(p, os.path.relpath(p, folder).replace(os.sep, '/'))
     return buf.getvalue()
 
 
 # ------------------------------------------------------------------ finding TVs
+def ssdp_reply_ok(data, ip):
+    """Is this SSDP answer, from address ip, a Roku on the local network? Its LOCATION, if it has one, must name the
+    same address it came from (a reply that points elsewhere could send PLAY's questions, and a password, anywhere)."""
+    text = data.decode('latin-1', 'replace')
+    if 'roku:ecp' not in text.lower() or not lan_address(ip):
+        return False
+    m = re.search(r'(?im)^location:\s*http://([^/:\s]+)', text)
+    return not m or m.group(1) == ip
+
+
 def _ssdp_once(local_ip, wait):
-    """Ask one adapter's network for Roku players. Returns {ip: serial-or-''}."""
+    """Ask one adapter's network for Roku players. Returns the set of their addresses: the address each answer
+    came from, only when it is on a local network and the answer's LOCATION (if any) names that same address."""
     msg = ('M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: "ssdp:discover"\r\n'
            'ST: roku:ecp\r\nMX: 2\r\n\r\n').encode()
-    found = {}
+    found = set()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
@@ -84,12 +118,8 @@ def _ssdp_once(local_ip, wait):
                 data, (ip, _) = s.recvfrom(2048)
             except socket.timeout:
                 continue
-            text = data.decode('latin-1', 'replace')
-            if 'roku:ecp' not in text.lower():
-                continue
-            m = re.search(r'(?im)^location:\s*http://([0-9.]+):', text)
-            usn = re.search(r'(?im)^usn:\s*uuid:roku:ecp:(\S+)', text)
-            found[m.group(1) if m else ip] = usn.group(1) if usn else ''
+            if ssdp_reply_ok(data, ip):
+                found.add(ip)
     except OSError:
         pass
     finally:
@@ -98,12 +128,22 @@ def _ssdp_once(local_ip, wait):
 
 
 def find(local_ips=(), also=(), wait=2.5):
-    """Addresses of Roku players: SSDP on every adapter PLAY serves on, plus 'also' (TVs that already talk to
-    PLAY, addresses typed by hand). Sorted, no repeats."""
-    ips = set(a for a in also if a)
-    for local in (list(local_ips) or [None]):
-        ips.update(_ssdp_once(local, wait))
-    return sorted(ips, key=lambda a: tuple(int(x) if x.isdigit() else 0 for x in a.split('.')))
+    """Addresses of Roku players: SSDP on every adapter PLAY serves on (all at once), plus 'also' (TVs that
+    already talk to PLAY, addresses typed by hand). Local-network IPv4 only, sorted, no repeats."""
+    ips = {a for a in also if lan_address(a)}
+    lock = threading.Lock()
+
+    def one(local):
+        got = _ssdp_once(local, wait)
+        with lock:
+            ips.update(got)
+    threads = [threading.Thread(target=one, args=(local,), daemon=True) for local in (list(local_ips) or [None])]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(wait + 2)
+    with lock:
+        return sorted(ips, key=ipaddress.IPv4Address)
 
 
 # ------------------------------------------------------------------ asking a TV
@@ -111,10 +151,17 @@ class Blocked(OSError):
     """The TV answered but refused: its "Control by mobile apps" setting is off (or Limited)."""
 
 
+def _read(r):
+    data = r.read(MAX_REPLY + 1)
+    if len(data) > MAX_REPLY:
+        raise OSError('The answer was too long to be from a TV')
+    return data
+
+
 def _get(url, timeout=4):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return r.read()
+        with _DIRECT.open(url, timeout=timeout) as r:
+            return _read(r)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise Blocked(f'{e.code}') from e
@@ -141,7 +188,7 @@ def dev_app(ip, timeout=4):
     for what in ('apps', 'active-app'):
         try:
             root = ET.fromstring(_get(f'http://{ip}:{ECP_PORT}/query/{what}', timeout))
-        except (OSError, ET.ParseError):
+        except Exception:                          # refused, garbled, cut off: this one doesn't say
             continue
         for a in root.iter('app'):
             if a.get('id') == 'dev':
@@ -154,6 +201,15 @@ def dev_app(ip, timeout=4):
 # ------------------------------------------------------------------ installing
 class WrongPassword(OSError):
     pass
+
+
+class _OnceDigest(urllib.request.HTTPDigestAuthHandler):
+    """Digest auth with one try: a second refusal is the wrong password (not five more uploads of the app)."""
+
+    def http_error_401(self, req, fp, code, msg, headers):
+        if req.unredirected_hdrs.get('Authorization'):
+            raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+        return super().http_error_401(req, fp, code, msg, headers)
 
 
 def _multipart(fields, files):
@@ -176,29 +232,22 @@ def install(ip, password, zip_bytes, timeout=120, port=80):
     url = f'http://{ip}:{port}/plugin_install' if port != 80 else f'http://{ip}/plugin_install'
     pm = urllib.request.HTTPPasswordMgrWithDefaultRealm()
     pm.add_password(None, url, DEV_USER, password)
-    opener = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(pm))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _OnceDigest(pm))
     body, ctype = _multipart({'mysubmit': 'Install'}, {'archive': ('PLAY-roku.zip', zip_bytes, 'application/zip')})
     req = urllib.request.Request(url, data=body, headers={'Content-Type': ctype}, method='POST')
     try:
         with opener.open(req, timeout=timeout) as r:
-            text = r.read().decode('utf-8', 'replace')
+            text = _read(r).decode('utf-8', 'replace')
     except urllib.error.HTTPError as e:
         if e.code == 401:
             raise WrongPassword('The TV did not accept that developer password') from e
         raise OSError(f'The TV answered {e.code}') from e
     msgs = re.findall(r'"text":"([^"]+)"', text) or re.findall(r'<font color="red">(.*?)</font>', text)
-    msg = ' '.join(m.strip() for m in msgs if m.strip()) or 'Installed'
+    msg = ' '.join(m.strip() for m in msgs if m.strip())
     low = msg.lower()
     if 'success' in low or 'identical' in low:
         return msg
-    raise OSError(msg)
-
-
-def launch(ip, timeout=4):
-    """Open the developer app (PLAY) on the TV."""
-    req = urllib.request.Request(f'http://{ip}:{ECP_PORT}/launch/dev', data=b'', method='POST')
-    with urllib.request.urlopen(req, timeout=timeout):
-        pass
+    raise OSError(msg or 'The TV answered in a way PLAY doesn\'t recognise')
 
 
 # ------------------------------------------------------------------ passwords (DPAPI, this Windows user only)
