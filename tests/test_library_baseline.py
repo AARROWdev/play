@@ -1724,3 +1724,30 @@ def test_an_episode_title_with_new_numbers_in_the_same_call(lib, tmp_path):
     ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
     lib.set_item(ep['id'], episode=3, title='Ann Droid S01E03')   # the new numbers' own title: automatic
     assert not lib.by_id(ep['id'])['typed_title']
+
+
+
+def test_folder_keeps_drive_roots_whole_and_strips_the_rest():
+    assert library._folder('c:' + os.sep + 'media' + os.sep) == 'c:' + os.sep + 'media'
+    assert library._folder('x:') == 'x:' + os.sep and library._folder('x:' + os.sep) == 'x:' + os.sep
+    assert library._folder(os.sep) == os.sep
+
+
+def test_an_episode_back_to_its_file_number_gets_its_second_number_back(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E01-E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], episode=5)
+    lib.set_item(ep['id'], episode=1, title='Ann Droid S01E01-E02')   # back to the file's numbers: automatic
+    assert not lib.by_id(ep['id'])['typed_title'] and lib.by_id(ep['id'])['title'] == 'Ann Droid S01E01-E02'
+
+
+def test_an_episode_title_with_padded_show_and_a_kind_change(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Pilot 2001.mkv', b'p' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = next(i for i in lib.current() if i['title'] == 'Pilot')
+    lib.set_item(m['id'], kind='episode', show=' Ann Droid ', season=1, episode=4, title='Ann Droid S01E04')
+    it = lib.by_id(m['id'])
+    assert it['kind'] == 'episode' and not it['typed_title']   # the numbers' own title: automatic

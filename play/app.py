@@ -303,6 +303,9 @@ class SettingsDialog(QDialog):
         return fs, self.port.value(), self.skin.currentText(), self.auto.isChecked()
 
 
+GONE_NOTE = 'That title is no longer in the library: the edit wasn\'t saved'
+
+
 def title_line(i):
     """How a title reads in a pick list: "Heat (1995)", "Bluey · S1 E3 · The Pool", "Bluey · S1 E3-E4"."""
     if i['kind'] == 'episode':
@@ -536,6 +539,7 @@ class Window(QMainWindow):
         self._title_for = None
         self._year_for = None
         self._note = None                                # (a passing note for the status bar, and until when)
+        self._refreshing = False
         # one redraw after a save, once the event that ended the typing is done (a click lands first); saves in a
         # row restart it, so a gesture redraws once
         self._redraw = QTimer(self)
@@ -821,6 +825,13 @@ class Window(QMainWindow):
             self.refresh()
 
     def refresh(self):
+        self._refreshing = True                          # selection changes from here on aren't the user's
+        try:
+            self._refresh()
+        finally:
+            self._refreshing = False
+
+    def _refresh(self):
         self._redraw.stop()                              # (this is the redraw a save was waiting for)
         # before the first scan nothing is drawn for real: leave drawn unset so the scan's result is drawn
         self.drawn = self.lib.version if self.lib._scanned else None
@@ -989,16 +1000,15 @@ class Window(QMainWindow):
             return self._detail_for([])
         ids = self.selected_ids()
         now = ids[0] if len(ids) == 1 else None
-        # typed without Enter, then another film picked: saved. Not while the box still has the focus: then the
-        # selection moved without the user (a background refresh), and the text may be half typed
         for box, fid, save in ((self.d_year, self._year_for, self._save_year),
                                (self.d_title, self._title_for, self._save_title)):
             if not (fid and fid != now and box.isModified()):
                 continue
-            if box.hasFocus():
-                # the selection moved without the user (a background refresh) while typing: the text may be half
-                # typed, so it isn't saved, and that's said
-                self._say('What you were typing wasn\'t saved: that title left this view')
+            if self._refreshing:
+                # a redraw moved the selection, not the user: the text may be half typed, so it isn't saved, and
+                # that's said
+                self._say(GONE_NOTE if self.lib.by_id(fid) is None else
+                          'What you were typing wasn\'t saved: that title left this view')
             elif save(fid):                              # typed, then another film picked
                 self._redraw.start()
             box.setModified(False)
@@ -1091,7 +1101,7 @@ class Window(QMainWindow):
         later)."""
         new = self.lib.by_id(fid)
         self.sel = [new if (i['id'] == fid and new is not None) else i for i in self.sel]
-        if new is not None and len(self.sel) == 1:
+        if new is not None and len(self.sel) == 1 and self.sel[0]['id'] == fid:
             self.d_heading.setText(new['title'])
 
     def _save_year(self, fid):
@@ -1100,7 +1110,7 @@ class Window(QMainWindow):
         text = self.d_year.text().strip()
         film = self.lib.by_id(fid)
         if film is None:
-            self._say('That title is no longer in the library: the edit wasn\'t saved')
+            self._say(GONE_NOTE)
             return False
         if film['kind'] != 'movie':
             self._say('That\'s an episode now (years are for films): the year wasn\'t saved')
@@ -1109,8 +1119,7 @@ class Window(QMainWindow):
         year = int(text) if text.isascii() and text.isdigit() else None
         if text and (year is None or not self.YEARS[0] <= year <= self.YEARS[1]):
             self.d_year.setText(str(film.get('year') or ''))    # not a year: back as it was
-            self._note = (f'"{text}" is not a year ({self.YEARS[0]}-{self.YEARS[1]})', time.monotonic() + 8)
-            self._status()
+            self._say(f'"{text}" is not a year ({self.YEARS[0]}-{self.YEARS[1]})')
         elif year != film.get('year'):                         # (empty: no year)
             self.lib.set_item(fid, year=year)
             self._saved(fid)
@@ -1122,7 +1131,7 @@ class Window(QMainWindow):
         t = self.d_title.text().strip()
         old = self.lib.by_id(fid)
         if old is None:
-            self._say('That title is no longer in the library: the edit wasn\'t saved')
+            self._say(GONE_NOTE)
             return False
         if t and t != old['title']:
             self.lib.set_item(fid, title=t)

@@ -1564,8 +1564,12 @@ def test_a_refresh_while_typing_doesnt_save_half_a_title(win):
     win.d_title.setFocus()
     win.d_title.selectAll()
     QTest.keyClicks(win.d_title, 'Aardv')                # still typing ...
-    win.view.clearSelection()                           # ... and a background refresh drops the film from view
-    win._sel_changed()
+    win._refreshing = True                              # ... and a background refresh drops the film from view
+    try:
+        win.view.clearSelection()
+        win._sel_changed()
+    finally:
+        win._refreshing = False
     assert win.lib.by_id(conor)['title'] == 'Conor'     # half a word isn't saved
     win.hide()
 
@@ -1605,18 +1609,17 @@ def test_after_a_save_the_panel_holds_the_saved_film(win):
 # ------------------------------------------------------------------ 45a7558 review
 def test_a_refresh_dropping_typing_says_so(win):
     from PySide6.QtTest import QTest
-    win.resize(1000, 600)
-    win.show()
-    win.activateWindow()
-    if not QTest.qWaitForWindowActive(win):
-        pytest.skip('no active window on this platform')
     pick(win, 'Conor')
-    win.d_title.setFocus()
-    QTest.keyClicks(win.d_title, 'x')
-    win.view.clearSelection()
-    win._sel_changed()
+    fid = win.sel[0]['id']
+    QTest.keyClicks(win.d_title, 'x')                # typed (no focus needed: the redraw flag decides)
+    win._refreshing = True                           # a redraw moves the selection, not the user
+    try:
+        win.view.clearSelection()
+        win._sel_changed()
+    finally:
+        win._refreshing = False
     assert win._note and "wasn't saved" in win._note[0]
-    win.hide()
+    assert win.lib.by_id(fid)['title'] == 'Conor'    # nothing half typed was saved
 
 
 def test_enter_with_nothing_typed_says_nothing(win):
@@ -1687,3 +1690,38 @@ def test_a_year_typed_in_collections_then_a_click_selects_the_film_clicked(win, 
     win.view.expandAll()
     assert win.selected_ids() == [want] and win.lib.by_id(jp)['year'] == 2020
     win.hide()
+
+
+
+# ------------------------------------------------------------------ 42bd0aa review
+def test_a_user_click_still_saves_with_the_box_focused(win):
+    from PySide6.QtTest import QTest
+    pick(win, 'Conor')
+    fid = win.sel[0]['id']
+    win.d_title.selectAll()
+    QTest.keyClicks(win.d_title, 'Conor Two')
+    pick(win, 'Clip')                                # the user picked another film (not a redraw)
+    assert win.lib.by_id(fid)['title'] == 'Conor Two'
+
+
+def test_a_deleted_film_while_typing_says_its_gone(win):
+    from PySide6.QtTest import QTest
+    pick(win, 'Conor')
+    fid = win.sel[0]['id']
+    QTest.keyClicks(win.d_title, 'x')
+    win.lib._by_id.pop(fid)
+    win._refreshing = True
+    try:
+        win.view.clearSelection()
+        win._sel_changed()
+    finally:
+        win._refreshing = False
+    assert 'no longer in the library' in win._note[0]
+
+
+def test_the_heading_is_left_alone_for_another_films_save(win):
+    pick(win, 'Conor')
+    other = next(i for i in win.lib._items if i['title'] == 'Clip')
+    win.lib.set_item(other['id'], title='Clip Two')
+    win._saved(other['id'])
+    assert win.d_heading.text() == 'Conor'
