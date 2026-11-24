@@ -152,7 +152,7 @@ def test_the_package_is_the_tv_app():
         'components/LoadTask.xml', 'components/MainScene.brs', 'components/MainScene.xml', 'images/icon.png',
         'images/icon_fhd.png', 'images/icon_hd.png', 'images/icon_sd.png', 'images/splash.png', 'manifest',
         'source/main.brs']
-    assert roku.app_version() == '1.0.0'
+    assert roku.app_version() == '1.1.0'
 
 
 def test_passwords_are_encrypted_for_this_user():

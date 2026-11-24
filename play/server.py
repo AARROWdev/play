@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import library
 
-VERSION = '1.0'
+VERSION = '1.1'
 DISCOVERY_PORT = 8601
 DISCOVER = b'PLAY-DISCOVER'
 CHUNK = 1 << 20
