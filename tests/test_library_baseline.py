@@ -2051,6 +2051,19 @@ def test_a_show_year_is_set_once_and_reaches_the_tv(lib, tmp_path):
     assert all(e['year'] is None for se in show['seasons'] for e in se['episodes'])   # episodes stay year-less
     lib.set_show_year('Ann Droid', None)
     assert lib.show_year('Ann Droid') is None
-    lib2 = library.Library(lib.dir)                              # kept across a restart
     lib.set_show_year('Ann Droid', 2026)
     assert library.Library(lib.dir).data['show_years'] == {names.show_key('Ann Droid'): 2026}
+
+
+
+def test_in_library_skips_titles_on_a_drive_thats_away_and_marks_hidden(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv', b'h' * 100)
+    make(str(tmp_path / 'm'), 'Ronin 1998.mkv', b'r' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    heat, ronin = sorted(lib.current(), key=lambda i: i['title'])
+    lib.set_item(ronin['id'], hidden=True)
+    have, hidden = lib.in_library()
+    assert have == {heat['id'], ronin['id']} and hidden == {ronin['id']}
+    lib.unreachable = [str(tmp_path / 'm')]                     # the drive went to sleep
+    assert lib.in_library() == (set(), set())

@@ -1782,3 +1782,22 @@ def test_add_media_waits_for_the_first_scan_and_no_leaves_no_folder(win, tmp_pat
     monkeypatch.setattr(pa.QMessageBox, 'exec', lambda box: pa.QMessageBox.No)
     win.add_media()
     assert not new_default.exists()                               # No: nothing made
+
+
+
+def test_add_media_checks_the_first_scan_before_the_picker(win, monkeypatch):
+    opened = []
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: opened.append(1) or ([], ''))
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: None)
+    monkeypatch.setattr(win.lib, '_scanned', 0)
+    win.add_media()
+    assert opened == []                                            # no picker: no selection to lose
+
+
+def test_a_year_typed_while_a_scan_changes_the_kind_isnt_saved(win):
+    film = next(i for i in win.lib._items if i['kind'] == 'movie')
+    pick(win, film['title'])
+    win._year_kind = 'movie'
+    win.lib.set_item(film['id'], kind='episode', show='X', season=1, episode=1)   # a scan, say, makes it an episode
+    win.d_year.setText('1999')
+    assert win._save_year(film['id']) is False and win.lib.show_year('X') is None

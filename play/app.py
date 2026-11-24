@@ -542,6 +542,7 @@ class Window(QMainWindow):
         self.sel = []
         self._title_for = None
         self._year_for = None
+        self._year_kind = None                           # (the kind the Year box was drawn for)
         self._note = None                                # (a passing note for the status bar, and until when)
         self._refreshing = False
         # one redraw after a save, once the event that ended the typing is done (a click lands first); saves in a
@@ -1052,6 +1053,7 @@ class Window(QMainWindow):
             shown = self.lib.show_year(one['show']) if one and one['kind'] == 'episode' else (one or {}).get('year')
             self.d_year.setText(str(shown or '') if one else '')
         self._year_for = one['id'] if one else None
+        self._year_kind = one['kind'] if one else None
         same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
             self.d_title.setText(one['title'] if one else '')
@@ -1121,6 +1123,9 @@ class Window(QMainWindow):
             self._say(GONE_NOTE)
             return False
         episode = film['kind'] == 'episode'                    # (an episode: the box is its show's year)
+        if self._year_kind and self._year_kind != film['kind']:
+            self._say('That title changed kind while you typed: the year wasn\'t saved')
+            return False
         old = self.lib.show_year(film['show']) if episode else film.get('year')
         # ASCII digits only: '²' or '١' pass isdigit() and int() refuses or misreads them
         year = int(text) if text.isascii() and text.isdigit() else None
@@ -1226,8 +1231,11 @@ class Window(QMainWindow):
             self.refresh()
 
     def add_media(self):
-        """Pick video files and move them into the default folder (optionally marked Kids)."""
+        """Pick video files and copy them into the default folder (optionally marked Kids)."""
         if self.busy():
+            return
+        if not self.lib._scanned:                        # (before the picker: no selection is lost)
+            QMessageBox.information(self, 'Add media', 'PLAY is still reading your folders. Try again in a moment.')
             return
         self.moving = True                             # from the file picker on: nothing else starts meanwhile
         try:
@@ -1245,9 +1253,6 @@ class Window(QMainWindow):
         if not paths:
             return
         paths = [os.path.normpath(p) for p in paths]
-        if not self.lib._scanned:
-            QMessageBox.information(self, 'Add media', 'PLAY is still reading your folders. Try again in a moment.')
-            return
         roots = [f['path'] for f in self.lib.folders]
         need = media.needed_space(paths, roots)
         probe = folder
@@ -1282,9 +1287,9 @@ class Window(QMainWindow):
             QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
             return
         # what's in the library now: titles on a drive that's away, or hidden, can be added again from elsewhere
-        known = {i['id'] for i in self.lib.current() if not i['hidden'] and os.path.exists(i['path'])}
+        known, hidden = self.lib.in_library()            # (from the last scan: no waiting on a sleeping drive)
         moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.copy_files(
-            paths, folder, roots, progress, fingerprints=kids, known=known), len(paths))
+            paths, folder, roots, progress, fingerprints=kids, known=known, hidden=hidden), len(paths))
         unmarked = []
         if kids:
             fps = [fp for _, fp in moved if fp]

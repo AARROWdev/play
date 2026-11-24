@@ -857,6 +857,20 @@ class Library:
         else:
             self.data['items'].pop(fp, None)
 
+    def in_library(self):
+        """(fingerprints of the titles PLAY has now, those of them that are hidden): titles kept from a drive
+        that's away aren't counted (a copy of one can be added from elsewhere). From what the last scan reached:
+        no disk is touched."""
+        away = [os.path.normcase(p) for p in self.unreachable]
+        have, hidden = set(), set()
+        for i in self._items:
+            if away and _under(os.path.normcase(i['path']), away):
+                continue
+            have.add(i['id'])
+            if i['hidden']:
+                hidden.add(i['id'])
+        return have, hidden
+
     def show_year(self, show):
         """The year set for a show (None if none)."""
         return self.data['show_years'].get(names.show_key(show)) if show else None

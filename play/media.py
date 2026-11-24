@@ -149,8 +149,12 @@ def needed_space(paths, roots=()):
     """Bytes the copies of these files would take: video files outside the media folders (roots), which are the
     ones that get copied (files that can't be read count as nothing)."""
     ids = {_identity(r) for r in roots}
-    total = 0
+    total, seen = 0, set()
     for p in paths:
+        key = os.path.normcase(os.path.abspath(p))
+        if key in seen:
+            continue                             # (the same path picked twice is copied once)
+        seen.add(key)
         if os.path.splitext(p)[1].lower() not in names.VIDEO_EXTS or (ids and _inside(p, ids)):
             continue
         try:
@@ -160,7 +164,7 @@ def needed_space(paths, roots=()):
     return total
 
 
-def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known=()):
+def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known=(), hidden=()):
     """Copy each video file into folder (episodes into <Show>\\Season N); the originals stay where they are.
     Files already inside a media folder (roots), files already in the library (known: its fingerprints) and
     anything that isn't a video file aren't copied. progress(i, total, name) is called before each. Returns
@@ -187,7 +191,7 @@ def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known
         if _inside(src, ids):
             dest = src                           # already in a media folder: PLAY lists it where it is (and marks it)
         elif fp is not None and fp in known:
-            failed.append((src, 'already in your library'))
+            failed.append((src, 'already in your library' + (' (hidden: see Hidden)' if fp in hidden else '')))
             continue
         else:
             try:

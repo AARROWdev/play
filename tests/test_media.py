@@ -180,3 +180,17 @@ def test_needed_space_counts_only_what_gets_copied(tmp_path):
     make(str(tmp_path / 'src'), 'notes.txt', b'n' * 900)
     assert media.needed_space([str(tmp_path / 'PLAY' / 'In.mkv'), str(tmp_path / 'src' / 'Out.mkv'),
                                str(tmp_path / 'src' / 'notes.txt')], roots=[str(tmp_path / 'PLAY')]) == 100
+
+
+
+def test_a_hidden_film_picked_again_says_its_hidden(tmp_path):
+    make(str(tmp_path / 'src'), 'Up 2009.mkv', b'u' * 1000)
+    p = str(tmp_path / 'src' / 'Up 2009.mkv')
+    fp = library.fingerprint(p, os.path.getsize(p))
+    added, failed = media.copy_files([p], str(tmp_path / 'dst'), known={fp}, hidden={fp})
+    assert added == [] and 'hidden' in failed[0][1]
+
+
+def test_needed_space_counts_a_path_picked_twice_once(tmp_path):
+    make(str(tmp_path), 'A.mkv', b'a' * 100)
+    assert media.needed_space([str(tmp_path / 'A.mkv')] * 2) == 100
