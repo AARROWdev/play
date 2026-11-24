@@ -124,8 +124,8 @@ def _copy_one(src, dest_dir):
     part = os.path.join(dest_dir, f'.{uuid.uuid4().hex}{PART}')
     try:
         shutil.copy2(src, part)
-        try:
-            os.chmod(part, stat.S_IWRITE | stat.S_IREAD)  # (a copy from a disc or card comes read-only)
+        try:                                     # (a copy from a disc or card comes read-only: make it writable)
+            os.chmod(part, stat.S_IMODE(os.stat(part).st_mode) | stat.S_IWRITE)
         except OSError:
             pass
         while True:                              # into place under a name nobody took meanwhile
@@ -145,10 +145,14 @@ def _copy_one(src, dest_dir):
         raise
 
 
-def needed_space(paths):
-    """Bytes the copies of these files would take (files that can't be read count as nothing)."""
+def needed_space(paths, roots=()):
+    """Bytes the copies of these files would take: video files outside the media folders (roots), which are the
+    ones that get copied (files that can't be read count as nothing)."""
+    ids = {_identity(r) for r in roots}
     total = 0
     for p in paths:
+        if os.path.splitext(p)[1].lower() not in names.VIDEO_EXTS or (ids and _inside(p, ids)):
+            continue
         try:
             total += os.path.getsize(p)
         except OSError:
@@ -163,6 +167,7 @@ def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known
     ([(new path, fingerprint or None)], [(path, why it wasn't copied)])."""
     ids = {_identity(r) for r in (list(roots) or [folder])}
     known = set(known)
+    picked = set()                               # (the same path picked twice)
     swept, added, failed = set(), [], []
     for i, src in enumerate(paths):
         if progress:
@@ -170,17 +175,20 @@ def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known
         if os.path.splitext(src)[1].lower() not in names.VIDEO_EXTS:
             failed.append((src, 'not a video file PLAY plays'))
             continue
+        key = os.path.normcase(os.path.abspath(src))
+        if key in picked:
+            continue
+        picked.add(key)
         fp = None
-        if fingerprints or known:
-            try:
-                fp = library.fingerprint(src, os.path.getsize(src))
-            except OSError:
-                pass                             # (copied all the same; a Kids mark waits for a later scan)
-        if fp is not None and fp in known:
+        try:                                     # (first and last 64 KB: cheap, and it catches the same film twice)
+            fp = library.fingerprint(src, os.path.getsize(src))
+        except OSError:
+            pass                                 # (copied all the same; a Kids mark waits for a later scan)
+        if _inside(src, ids):
+            dest = src                           # already in a media folder: PLAY lists it where it is (and marks it)
+        elif fp is not None and fp in known:
             failed.append((src, 'already in your library'))
             continue
-        if _inside(src, ids):
-            dest = src                           # already in a media folder: PLAY lists it where it is
         else:
             try:
                 where = destination(src, folder)

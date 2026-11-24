@@ -124,6 +124,9 @@ def run_with_progress(parent, title, job, total):
     return box['value']
 
 
+SPARE = 256 * 2 ** 20                       # room Add media leaves free on the drive
+
+
 def human_size(n):
     for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
         if n < 1024 or unit == 'TB':
@@ -1242,15 +1245,23 @@ class Window(QMainWindow):
         if not paths:
             return
         paths = [os.path.normpath(p) for p in paths]
-        need = media.needed_space(paths)
+        if not self.lib._scanned:
+            QMessageBox.information(self, 'Add media', 'PLAY is still reading your folders. Try again in a moment.')
+            return
+        roots = [f['path'] for f in self.lib.folders]
+        need = media.needed_space(paths, roots)
+        probe = folder
+        while probe and not os.path.isdir(probe):        # (the folder may not exist yet: its drive says)
+            up = os.path.dirname(probe)
+            probe = up if up != probe else None
         try:
-            os.makedirs(folder, exist_ok=True)
-            free = shutil.disk_usage(folder).free
+            usable = shutil.disk_usage(probe).free - SPARE if probe else None
         except OSError:
-            free = None
-        if free is not None and need > free - 256 * 2 ** 20:   # (keep a little room for Windows)
+            usable = None
+        if usable is not None and need > usable:
             QMessageBox.warning(self, 'Add media', f'Not enough space in {folder}: the copies need '
-                                f'{human_size(need)} and the drive has {human_size(max(free, 0))} free.')
+                                f'{human_size(need)} and {human_size(max(usable, 0))} can be used '
+                                f'(PLAY leaves {human_size(SPARE)} free for Windows).')
             return
         box = QMessageBox(QMessageBox.Question, 'Add media',
                           f'Copy {plural(len(paths), "file")} ({human_size(need)}) into {folder}?',
@@ -1266,12 +1277,12 @@ class Window(QMainWindow):
         finally:
             box.deleteLater()
         try:
-            os.makedirs(folder, exist_ok=True)
+            os.makedirs(folder, exist_ok=True)               # (only now: No leaves no empty folder behind)
         except OSError as e:
             QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
             return
-        roots = [f['path'] for f in self.lib.folders]
-        known = {i['id'] for i in self.lib._items}
+        # what's in the library now: titles on a drive that's away, or hidden, can be added again from elsewhere
+        known = {i['id'] for i in self.lib.current() if not i['hidden'] and os.path.exists(i['path'])}
         moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.copy_files(
             paths, folder, roots, progress, fingerprints=kids, known=known), len(paths))
         unmarked = []

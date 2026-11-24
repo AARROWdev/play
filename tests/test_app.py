@@ -1764,3 +1764,21 @@ def test_the_year_box_sets_an_episodes_show_year(win):
     assert win.lib.by_id(ep['id'])['year'] is None                 # the episode itself has no film year
     pick(win, ep['title'])
     assert win.d_year.text() == '2026'
+
+
+
+def test_add_media_waits_for_the_first_scan_and_no_leaves_no_folder(win, tmp_path, monkeypatch):
+    make(str(tmp_path / 'Downloads'), 'Up 2009.mkv', b'up' * 500)
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(tmp_path / 'Downloads' / 'Up 2009.mkv')], ''))
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'information', lambda *a: told.append(a[2]))
+    monkeypatch.setattr(win.lib, '_scanned', 0)
+    win.add_media()
+    assert 'still reading' in told[-1]
+    monkeypatch.undo()
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(tmp_path / 'Downloads' / 'Up 2009.mkv')], ''))
+    new_default = tmp_path / 'Fresh' / 'PLAY'
+    monkeypatch.setattr(type(win.lib), 'default_folder', property(lambda self: str(new_default)))
+    monkeypatch.setattr(pa.QMessageBox, 'exec', lambda box: pa.QMessageBox.No)
+    win.add_media()
+    assert not new_default.exists()                               # No: nothing made

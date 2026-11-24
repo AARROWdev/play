@@ -85,7 +85,7 @@ def test_the_same_file_picked_twice_is_copied_once(tmp_path):
     make(str(tmp_path / 'a'), 'Up 2009.mkv', b'u' * 1000)
     make(str(tmp_path / 'b'), 'Up 2009.mkv', b'u' * 1000)            # the same film in two places
     added, failed = media.copy_files([str(tmp_path / 'a' / 'Up 2009.mkv'), str(tmp_path / 'b' / 'Up 2009.mkv')],
-                                     str(tmp_path / 'dst'), known={'0' * 16})
+                                     str(tmp_path / 'dst'))                # (an empty library, Kids not ticked)
     assert len(added) == 1 and 'already in your library' in failed[0][1]
     assert os.listdir(tmp_path / 'dst') == ['Up 2009.mkv']
 
@@ -155,3 +155,28 @@ def test_a_show_named_like_a_device_gets_a_usable_folder(tmp_path):
     make(str(tmp_path / 'src'), 'Con S01E01.mkv', b'c' * 100)
     added, failed = media.copy_files([str(tmp_path / 'src' / 'Con S01E01.mkv')], str(tmp_path / 'PLAY'))
     assert failed == [] and os.path.exists(tmp_path / 'PLAY' / 'Con_' / 'Season 1' / 'Con S01E01.mkv')
+
+
+
+def test_the_same_path_picked_twice_is_copied_once(tmp_path):
+    make(str(tmp_path / 'a'), 'Up 2009.mkv', b'u' * 1000)
+    p = str(tmp_path / 'a' / 'Up 2009.mkv')
+    added, failed = media.copy_files([p, p], str(tmp_path / 'dst'))
+    assert len(added) == 1 and os.listdir(tmp_path / 'dst') == ['Up 2009.mkv']
+
+
+def test_a_file_already_in_a_media_folder_is_listed_not_refused(tmp_path):
+    lib_dir = tmp_path / 'PLAY'
+    make(str(lib_dir), 'Up 2009.mkv', b'u' * 1000)
+    p = str(lib_dir / 'Up 2009.mkv')
+    fp = library.fingerprint(p, os.path.getsize(p))
+    added, failed = media.copy_files([p], str(lib_dir), roots=[str(lib_dir)], fingerprints=True, known={fp})
+    assert failed == [] and added == [(p, fp)]                  # listed where it is, so it can be marked Kids
+
+
+def test_needed_space_counts_only_what_gets_copied(tmp_path):
+    make(str(tmp_path / 'PLAY'), 'In.mkv', b'i' * 500)
+    make(str(tmp_path / 'src'), 'Out.mkv', b'o' * 100)
+    make(str(tmp_path / 'src'), 'notes.txt', b'n' * 900)
+    assert media.needed_space([str(tmp_path / 'PLAY' / 'In.mkv'), str(tmp_path / 'src' / 'Out.mkv'),
+                               str(tmp_path / 'src' / 'notes.txt')], roots=[str(tmp_path / 'PLAY')]) == 100
