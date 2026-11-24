@@ -143,7 +143,7 @@ $src = "$srcDir\Added Film (2005).mp4"
 New-Item -ItemType Directory -Force $srcDir | Out-Null
 [IO.File]::WriteAllBytes($src, [byte[]](3..240) * 5000)
 (Get-Item $src).LastWriteTime = (Get-Date).AddHours(-1)
-$srcHash = (Get-FileHash $src -Algorithm SHA256).Hash
+$srcHash = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash
 $copy = "$media\Movies\Added Film (2005).mp4"
 $ae = [System.Windows.Automation.AutomationElement]
 $win = $ae::FromHandle((Get-Process -Id $firstPid).MainWindowHandle)
@@ -164,10 +164,14 @@ T 'Add media copied the file into the default folder' {
     $ok = WaitFor { Test-Path -LiteralPath $copy } 30
     Verdict ($ok -and ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -eq $srcHash)) "copy exists: $ok"
 }
-T 'Add media left the original in place, unchanged' { Verdict ((Test-Path -LiteralPath $src) -and ((Get-FileHash $src -Algorithm SHA256).Hash -eq $srcHash)) "original exists: $(Test-Path -LiteralPath $src)" }
+T 'Add media left the original in place, unchanged' { Verdict ((Test-Path -LiteralPath $src) -and ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -eq $srcHash)) "original exists: $(Test-Path -LiteralPath $src)" }
 T 'the added film shows up in the library' {
     $found = WaitFor { try { @((Invoke-RestMethod 'http://127.0.0.1:8600/api/tv?side=home' -TimeoutSec 5).movies | Where-Object { $_.title -eq 'Added Film' }).Count -eq 1 } catch { $false } } 60
     Verdict $found "listed: $found"
+}
+T 'Add media changed nothing else in the media folder (no rename, rewrite or leftover .playpart)' {
+    $expected = (@($before -split "`n") + "$copy|$srcHash") | Sort-Object { $_.Split('|')[0] }
+    Verdict ((MediaState) -ceq ($expected -join "`n")) 'media folder is the old files plus exactly the copy'
 }
 $before = MediaState                                      # (the media folder now holds the added copy)
 
