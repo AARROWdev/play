@@ -23,7 +23,7 @@ them. Setting it up takes about 15 minutes the first time, most of it on the TV.
 5. **PLAY opens Settings the first time.** It starts with one media folder, `Videos\PLAY`. Click **Save**.
    - Your films are somewhere else already (another drive, a NAS)? Click **Add folder…** and pick that folder
      too. **Make default** chooses where new media goes.
-6. **Add your movies.** Click **Add media…**, pick the files, and confirm. PLAY *moves* them into your default
+6. **Add your movies.** Click **Add media…**, pick the files, and confirm. PLAY *copies* them into your default
    folder (episodes go into `Show\Season 1` folders for you). Tick **Mark them Kids** for children's titles.
 
 PLAY now lives in the tray (by the clock) and starts with Windows, so the TVs can always reach it.

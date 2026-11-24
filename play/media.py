@@ -1,9 +1,8 @@
-"""Adding media: move files the user picked into PLAY's default folder.
+"""Adding media: copy files the user picked into PLAY's default folder. The originals are never touched.
 
-A move never leaves a half file where PLAY (or the TV) would list it: across drives (or when Windows won't just
-rename the file) it is copied to a hidden ".playpart" name the scan ignores, renamed into place only once the copy
-is whole, and the original is removed last. If anything fails on the way, the copy is removed again and the
-original stays where it was.
+A copy never leaves a half file where PLAY (or the TV) would list it: it is written to a hidden ".playpart" name
+the scan ignores and renamed into place only once it is whole. If anything fails on the way, the part is removed
+again. A file already in the library (the same fingerprint) isn't copied a second time.
 """
 import os
 import shutil
@@ -96,11 +95,11 @@ def _made_dirs(dest_dir):
     return out
 
 
-STALE_PART = 6 * 3600     # a part file older than this was left by a move that stopped
+STALE_PART = 6 * 3600     # a part file older than this was left by a copy that stopped
 
 
 def _sweep(dest_dir):
-    """Copies left half-made by a move that was stopped (PLAY closed mid-copy, say): old ones only, so a copy
+    """Copies left half-made by a copy that was stopped (PLAY closed mid-copy, say): old ones only, so a copy
     another PLAY is making right now is left alone."""
     import time
     try:
@@ -115,17 +114,30 @@ def _sweep(dest_dir):
         pass
 
 
-def _move_one(src, dest_dir):
-    """Move src into dest_dir under a free name; returns the new path. Raises OSError, leaving nothing behind
-    (no copy, no file of its own, no new empty folder)."""
+def _copy_one(src, dest_dir):
+    """Copy src into dest_dir under a free name; returns the new path. Raises OSError, leaving nothing behind
+    (no part file, no new empty folder). The original is only read."""
     if not os.path.isfile(src):
         raise FileNotFoundError(2, 'the file is not there any more')
     made = _made_dirs(dest_dir)
     os.makedirs(dest_dir, exist_ok=True)
+    part = os.path.join(dest_dir, f'.{uuid.uuid4().hex}{PART}')
     try:
-        return _move_into(src, dest_dir)
+        shutil.copy2(src, part)
+        try:
+            os.chmod(part, stat.S_IWRITE | stat.S_IREAD)  # (a copy from a disc or card comes read-only)
+        except OSError:
+            pass
+        while True:                              # into place under a name nobody took meanwhile
+            final = free_name(dest_dir, os.path.basename(src))
+            try:
+                os.rename(part, final)
+                return final
+            except FileExistsError:
+                continue
     except OSError:
-        for d in reversed(made):                    # folders made for it, now empty again
+        _remove(part)
+        for d in reversed(made):                 # folders made for it, now empty again
             try:
                 os.rmdir(d)
             except OSError:
@@ -133,47 +145,39 @@ def _move_one(src, dest_dir):
         raise
 
 
-def _move_into(src, dest_dir):
-    name = os.path.basename(src)
-    try:                                         # same drive: a rename (it never overwrites on Windows)
-        final = free_name(dest_dir, name)
-        os.rename(src, final)
-        return final
-    except OSError:
-        pass
-    if not os.access(src, os.W_OK):              # read-only (a disc, a card, a share): it can't be moved away
-        raise PermissionError(13, 'read-only: it can be copied, not moved')
-    part = os.path.join(dest_dir, f'.{uuid.uuid4().hex}{PART}')
-    try:
-        shutil.copy2(src, part)
-        while True:                              # into place under a name nobody took meanwhile
-            final = free_name(dest_dir, name)
-            try:
-                os.rename(part, final)
-                break
-            except FileExistsError:
-                continue
-    except OSError:
-        _remove(part)
-        raise
-    if not _remove(src):                         # last: only once the copy is in place
-        if not _remove(final):                   # the original stays: don't leave two copies
-            raise OSError(f'could not move it, and the copy at {final} could not be removed')
-        raise PermissionError(13, 'the original could not be removed, so it was not moved')
-    return final
+def needed_space(paths):
+    """Bytes the copies of these files would take (files that can't be read count as nothing)."""
+    total = 0
+    for p in paths:
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
 
 
-def move_files(paths, folder, roots=(), progress=None, fingerprints=False):
-    """Move each video file into folder (episodes into <Show>\\Season N). Files already inside a media folder
-    (roots) and anything that isn't a video file are left where they are. progress(i, total, name) is called
-    before each. Returns ([(new path, fingerprint or None)], [(path, why it wasn't moved)])."""
+def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known=()):
+    """Copy each video file into folder (episodes into <Show>\\Season N); the originals stay where they are.
+    Files already inside a media folder (roots), files already in the library (known: its fingerprints) and
+    anything that isn't a video file aren't copied. progress(i, total, name) is called before each. Returns
+    ([(new path, fingerprint or None)], [(path, why it wasn't copied)])."""
     ids = {_identity(r) for r in (list(roots) or [folder])}
-    swept, moved, failed = set(), [], []
+    known = set(known)
+    swept, added, failed = set(), [], []
     for i, src in enumerate(paths):
         if progress:
             progress(i, len(paths), os.path.basename(src))
         if os.path.splitext(src)[1].lower() not in names.VIDEO_EXTS:
             failed.append((src, 'not a video file PLAY plays'))
+            continue
+        fp = None
+        if fingerprints or known:
+            try:
+                fp = library.fingerprint(src, os.path.getsize(src))
+            except OSError:
+                pass                             # (copied all the same; a Kids mark waits for a later scan)
+        if fp is not None and fp in known:
+            failed.append((src, 'already in your library'))
             continue
         if _inside(src, ids):
             dest = src                           # already in a media folder: PLAY lists it where it is
@@ -183,15 +187,11 @@ def move_files(paths, folder, roots=(), progress=None, fingerprints=False):
                 if where not in swept:
                     swept.add(where)
                     _sweep(where)
-                dest = _move_one(src, where)
+                dest = _copy_one(src, where)
             except OSError as e:
                 failed.append((src, e.strerror or str(e)))
                 continue
-        fp = None
-        if fingerprints:                         # (only when it's needed: marking them Kids)
-            try:
-                fp = library.fingerprint(dest, os.path.getsize(dest))
-            except OSError:
-                pass                             # moved all the same; the mark waits for a later scan
-        moved.append((dest, fp))
-    return moved, failed
+        if fp is not None:
+            known.add(fp)                        # (the same file picked twice is copied once)
+        added.append((dest, fp if fingerprints else None))
+    return added, failed

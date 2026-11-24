@@ -7,7 +7,7 @@ the files straight from your drives to the TVs in your house.
 
 - **One library, tagged your way.** One media folder to start (add more if you like). Kids, movie or show, hidden
   and collections are tags inside PLAY, not folders, and they follow a file if you rename or move it. PLAY never
-  renames or changes your files; **Add media** moves the files you pick into your media folder.
+  renames or changes your files; **Add media** copies the files you pick into your media folder (the originals stay).
 - **Shows grouped for you.** `Show S01E02`, `1x02`, `Season 1 Episode 2` and `Show/Season 1/E02` all work. PLAY spots
   missing and doubled episodes.
 - **Collections.** A film series, or your own "Comedy", shows on the TV as one entry, in release order or your
@@ -24,7 +24,7 @@ the files straight from your drives to the TVs in your house.
 
 1. **On the PC:** install **PLAYSetup-&lt;version&gt;.exe** from the
    [latest release](https://github.com/AARROWdev/play/releases/latest) (Windows 10/11, 64-bit). PLAY starts with one
-   media folder, `Videos\PLAY`; **Add media** moves movies and shows there. It lives in the tray and starts with
+   media folder, `Videos\PLAY`; **Add media** copies movies and shows there. It lives in the tray and starts with
    Windows, so the TVs can always reach it.
 2. **On each Roku TV, once:** turn on Developer Mode with the remote (**Home ×3, Up ×2, Right, Left, Right, Left,
    Right**, then *Enable installer and restart* and set a developer password).

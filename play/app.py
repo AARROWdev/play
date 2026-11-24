@@ -2,6 +2,7 @@
 import html
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -206,11 +207,11 @@ class SettingsDialog(QDialog):
         self.lib = lib
         v = QVBoxLayout(self)
         if first_run:
-            hi = QLabel('<b>Welcome to PLAY.</b> Your movies and shows go in the folder below (Add media puts '
+            hi = QLabel('<b>Welcome to PLAY.</b> Your movies and shows go in the folder below (Add media copies '
                         'them there for you). If they are somewhere else already, add that folder too.')
             hi.setWordWrap(True)
             v.addWidget(hi)
-        note = QLabel('Media folders. The first one is the default: Add media moves files there. Kids, movies and '
+        note = QLabel('Media folders. The first one is the default: Add media copies files there. Kids, movies and '
                       'shows are marked in the library, not by folder.')
         note.setWordWrap(True)
         v.addWidget(note)
@@ -609,9 +610,9 @@ class Window(QMainWindow):
         self.heading.setObjectName('heading')
         head.addWidget(self.heading)
         head.addStretch()
-        am = QPushButton('Add media…')                  # pick files: they're moved into the default folder
+        am = QPushButton('Add media…')                  # pick files: they're copied into the default folder
         am.setObjectName('chip')
-        am.setToolTip('Pick movies or episodes: PLAY moves them into your default media folder')
+        am.setToolTip('Pick movies or episodes: PLAY copies them into your default media folder (the originals stay)')
         am.clicked.connect(self.add_media)
         head.addWidget(am)
         nc = QPushButton('New collection…')            # always here: any group of films, named as you like
@@ -1235,10 +1236,21 @@ class Window(QMainWindow):
         if not paths:
             return
         paths = [os.path.normpath(p) for p in paths]
+        need = media.needed_space(paths)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            free = None
+        if free is not None and need > free - 256 * 2 ** 20:   # (keep a little room for Windows)
+            QMessageBox.warning(self, 'Add media', f'Not enough space in {folder}: the copies need '
+                                f'{human_size(need)} and the drive has {human_size(max(free, 0))} free.')
+            return
         box = QMessageBox(QMessageBox.Question, 'Add media',
-                          f'Move {plural(len(paths), "file")} into {folder}?', QMessageBox.Yes | QMessageBox.No, self)
+                          f'Copy {plural(len(paths), "file")} ({human_size(need)}) into {folder}?',
+                          QMessageBox.Yes | QMessageBox.No, self)
         box.setTextFormat(Qt.PlainText)
-        box.setInformativeText('They are moved, not copied: they leave the folder they are in now.')
+        box.setInformativeText('They are copied: the originals stay where they are.')
         kids = QCheckBox('Mark them Kids')
         box.setCheckBox(kids)
         try:
@@ -1253,8 +1265,9 @@ class Window(QMainWindow):
             QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
             return
         roots = [f['path'] for f in self.lib.folders]
-        moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.move_files(
-            paths, folder, roots, progress, fingerprints=kids), len(paths))
+        known = {i['id'] for i in self.lib._items}
+        moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.copy_files(
+            paths, folder, roots, progress, fingerprints=kids, known=known), len(paths))
         unmarked = []
         if kids:
             fps = [fp for _, fp in moved if fp]
@@ -1264,15 +1277,15 @@ class Window(QMainWindow):
         self.scanner.kick()
         notes = []
         if failed:
-            notes.append('These were not moved:\n' + '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
-        if unmarked:                                   # moved, but its Kids mark couldn't be set: say so
-            notes.append('These were moved but could not be marked Kids (mark them in the library):\n' +
+            notes.append('These were not added:\n' + '\n'.join(f'{os.path.basename(p)}: {why}' for p, why in failed))
+        if unmarked:                                   # copied, but its Kids mark couldn't be set: say so
+            notes.append('These were added but could not be marked Kids (mark them in the library):\n' +
                          '\n'.join(os.path.basename(p) for p in unmarked))
         if notes:
             QMessageBox.warning(self, 'Add media', '\n\n'.join(notes))
 
     def busy(self):
-        """Files are being moved: say so (True) rather than start something else meanwhile."""
+        """Files are being copied in: say so (True) rather than start something else meanwhile."""
         if getattr(self, 'moving', False):
             QMessageBox.information(self, 'PLAY', 'PLAY is adding media to your media folder. Finish that first.')
             return True

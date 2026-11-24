@@ -893,7 +893,7 @@ def test_more_folders_and_which_is_default(win, tmp_path, monkeypatch):
     assert all(f['kids'] is False for f in fs)                              # Settings never makes a Kids folder
 
 
-def test_add_media_moves_the_files_into_the_default_folder(win, tmp_path, monkeypatch):
+def test_add_media_copies_the_files_into_the_default_folder(win, tmp_path, monkeypatch):
     downloads = tmp_path / 'Downloads'
     make(str(downloads), 'Up 2009.mkv', b'up' * 500)
     make(str(downloads), 'Heat 1995.mkv', b'other heat' * 500)
@@ -907,7 +907,7 @@ def test_add_media_moves_the_files_into_the_default_folder(win, tmp_path, monkey
         return pa.QMessageBox.Yes
     monkeypatch.setattr(pa.QMessageBox, 'exec', yes_with_kids)
     win.add_media()
-    assert not list(downloads.iterdir())                                     # moved, not copied
+    assert sorted(f.name for f in downloads.iterdir()) == ['Heat 1995.mkv', 'Up 2009.mkv']   # copied: still there
     assert os.path.exists(os.path.join(default, 'Up 2009.mkv'))
     assert os.path.exists(os.path.join(default, 'Heat 1995 [2].mkv'))        # nothing overwritten
     up = library.fingerprint(os.path.join(default, 'Up 2009.mkv'), 1000)
@@ -1736,3 +1736,17 @@ def test_the_heading_is_left_alone_for_another_films_save(win):
     win.lib.set_item(other['id'], title='Clip Two')
     win._saved(other['id'])
     assert win.d_heading.text() == 'Conor'
+
+
+
+def test_add_media_refuses_when_the_drive_is_too_full(win, tmp_path, monkeypatch):
+    make(str(tmp_path / 'Downloads'), 'Up 2009.mkv', b'up' * 500)
+    monkeypatch.setattr(pa.QFileDialog, 'getOpenFileNames', lambda *a, **k: ([str(tmp_path / 'Downloads' / 'Up 2009.mkv')], ''))
+    monkeypatch.setattr(pa.shutil, 'disk_usage', lambda p: type('U', (), {'free': 10})())
+    told = []
+    monkeypatch.setattr(pa.QMessageBox, 'warning', lambda *a: told.append(a[2]))
+    asked = []
+    monkeypatch.setattr(pa.QMessageBox, 'exec', lambda box: asked.append(1) or pa.QMessageBox.Yes)
+    win.add_media()
+    assert told and 'Not enough space' in told[-1] and asked == []
+    assert not os.path.exists(os.path.join(win.lib.default_folder, 'Up 2009.mkv'))
