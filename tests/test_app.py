@@ -1736,3 +1736,17 @@ def test_the_heading_is_left_alone_for_another_films_save(win):
     win.lib.set_item(other['id'], title='Clip Two')
     win._saved(other['id'])
     assert win.d_heading.text() == 'Conor'
+
+
+
+def test_the_title_box_confirms_a_name_play_couldnt_read(win, tmp_path):
+    make(str(tmp_path / 'home'), '1080p.mkv', b'x' * 100)
+    win.lib.scan()
+    win.refresh()
+    pick(win, '1080p')
+    fid = win.sel[0]['id']
+    assert win.lib.by_id(fid)['untitled']
+    win.d_title.setText('1080p')
+    win.d_title.setModified(True)
+    win._title_done()                                  # Enter on the same name: "yes, call it that"
+    assert not win.lib.by_id(fid)['untitled']

@@ -748,7 +748,7 @@ class Library:
         it['auto_near_miss'] = it['near_miss']
         ov = self.data['items'].get(fp, {})
         it['auto_untitled'] = it['untitled']
-        s, _auto_title, used = _resolve(it['auto'], it['auto_last'], ov)
+        s, _auto_title, used = _resolve(it['auto'], it['auto_last'], ov, it['auto_untitled'])
         it.update(s)
         if it['kind'] == 'episode' or used & {'title', 'kind'}:   # you named it or said "movie": no more hints
             it['near_miss'] = None
@@ -796,7 +796,7 @@ class Library:
         ov = dict(self.data['items'].get(fp, {}))
         fields = {k: v.strip() if isinstance(v, str) else v for k, v in fields.items()}
         for k, v in fields.items():
-            if k == 'title' and cur is not None:
+            if k in ('title', 'year') and cur is not None:
                 continue                         # decided below, once the other fields of this edit are in
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
@@ -806,21 +806,21 @@ class Library:
             else:
                 ov[k] = v
         if cur is not None:
-            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
-            stored = self.data['items'].get(fp, {})
-            if 'year' in fields and s['kind'] == 'episode':
-                # an episode has no film year: a year sent for one isn't kept, and the film year it had stays
-                if 'year' in stored:
-                    ov['year'] = stored['year']
-                else:
+            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov, cur.get('auto_untitled'))
+            # an episode has no film year: a year sent for one isn't kept (the film year it had stays)
+            if 'year' in fields and s['kind'] != 'episode':
+                if cur['auto'].get('year') == fields['year']:
                     ov.pop('year', None)
+                else:
+                    ov['year'] = fields['year']
             # the title this edit leaves automatic (an episode: from its numbers, as the edit leaves them). Typing
             # exactly that goes back to automatic (a typed title the new numbers now match does too); anything else
             # is kept as typed. A file PLAY couldn't name keeps a typed title even when it's the file name: that's
             # the answer to "set a title"
             confirms_name = s['kind'] == 'movie' and cur.get('auto_untitled')
             v = fields.get('title', ov.get('title'))
-            if 'title' in fields or 'title' in ov:
+            renamed = bool(set(fields) & {'title', 'kind', 'show', 'season', 'episode'})   # (a Kids toggle isn't)
+            if renamed and ('title' in fields or 'title' in ov):
                 if v == auto_title and not confirms_name:
                     ov.pop('title', None)
                 elif 'title' in fields:
@@ -1050,7 +1050,7 @@ def _finite(v):
     return v if math.isfinite(v) else None
 
 
-def _resolve(auto, auto_last, ov):
+def _resolve(auto, auto_last, ov, auto_untitled=False):
     """(fields, auto_title, used): a title's kind, show, season, episode, second episode number, year, title and
     typed_title as PLAY uses them (the automatic values with the valid overrides on top; a bad hand-edited value is
     ignored, not fatal), the title it would have untyped, and the overrides that took effect. The one rule for
@@ -1068,10 +1068,14 @@ def _resolve(auto, auto_last, ov):
         used.discard('kind')                 # (a kind that couldn't apply, e.g. an episode with no details)
     if s['kind'] == 'movie':
         s['show'] = s['season'] = s['episode'] = s['episode_last'] = None
+        used -= {'show', 'season', 'episode'}
         auto_title = auto.get('title')
     else:
         s['year'] = None                     # an episode has no film year (one made from a film drops it)
+        used.discard('year')
         auto_title = _ep_title(s['show'], s['season'], s['episode'], s['episode_last'])
+        if auto_untitled and s.get('title') == auto.get('title'):
+            used.discard('title')            # a confirmed file name: as an episode it's named by its numbers
     # the title follows the numbers (or the file name) unless one was typed
     s['typed_title'] = 'title' in used
     if not s['typed_title']:

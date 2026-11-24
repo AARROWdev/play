@@ -1813,6 +1813,7 @@ def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
     assert it['kind'] == 'episode' and it['year'] is None     # no film year on an episode (Year column, TV)
     lib.set_items([m['id']], year=1990)                        # a year sent for an episode (not from the UI)
     assert lib.by_id(m['id'])['year'] is None and 'year' not in lib.data['items'].get(m['id'], {})
+    assert '1982' not in json.dumps(lib.tv_view(kids=False))     # the TV payload carries no film year for it
     lib.set_item(m['id'], kind='movie')
     assert lib.by_id(m['id'])['year'] == 1982                 # a film again: its year is back
 
@@ -1898,12 +1899,42 @@ def test_the_near_miss_hint_on_a_movie_follows_valid_overrides_only(lib, tmp_pat
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
     m = lib.current()[0]
-    if not m.get('auto_near_miss'):
-        pytest.skip('this name is not flagged as a near miss')
-    assert lib.by_id(m['id'])['near_miss']
+    assert m['auto_near_miss'] and lib.by_id(m['id'])['near_miss']   # ('Ep 1' with no season: flagged)
     lib.data['items'][m['id']] = {'kind': 'episode'}            # a hand edit with no details: can't apply
     lib._rebuild()
     assert lib.by_id(m['id'])['kind'] == 'movie' and lib.by_id(m['id'])['near_miss']   # the hint stays
     lib.data['items'][m['id']] = {'title': 'The Road'}          # a real title: the hint is answered
     lib._rebuild()
     assert not lib.by_id(m['id'])['near_miss']
+
+
+
+def test_a_confirmed_file_name_made_an_episode_is_named_by_its_numbers(lib, tmp_path):
+    make(str(tmp_path / 'm'), '1080p.mkv', b'x' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.set_item(m['id'], title='1080p')
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
+    assert lib.by_id(m['id'])['title'] == 'Home S01E01'
+
+
+def test_a_kids_toggle_doesnt_drop_a_typed_title(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'title': 'Ann Droid S01E02', 'episode': 2}   # stored typed, equal to auto
+    lib._rebuild()
+    lib.set_item(ep['id'], kids=True)
+    assert lib.data['items'][ep['id']].get('title') == 'Ann Droid S01E02'      # a Kids toggle leaves it
+
+
+def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
+    from play.library import _resolve
+    auto = {'kind': 'movie', 'title': 'Heat', 'year': 1995, 'show': None, 'season': None, 'episode': None,
+            'kids': False, 'hidden': False}
+    s, _t, used = _resolve(auto, None, {'show': 'X', 'season': 1})            # a movie: no episode details used
+    assert s['kind'] == 'movie' and not used & {'show', 'season', 'episode'}
+    s, _t, used = _resolve(auto, None, {'kind': 'episode', 'show': 'X', 'season': 1, 'episode': 1, 'year': 1999})
+    assert s['kind'] == 'episode' and 'year' not in used
