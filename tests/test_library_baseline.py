@@ -1813,7 +1813,9 @@ def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
     assert it['kind'] == 'episode' and it['year'] is None     # no film year on an episode (Year column, TV)
     lib.set_items([m['id']], year=1990)                        # a year sent for an episode (not from the UI)
     assert lib.by_id(m['id'])['year'] is None and 'year' not in lib.data['items'].get(m['id'], {})
-    assert '1982' not in json.dumps(lib.tv_view(kids=False))     # the TV payload carries no film year for it
+    entry = next(e for show in lib.tv_view(kids=False)['shows'] for season in show['seasons']
+                 for e in season['episodes'] if e['id'] == m['id'])
+    assert entry['year'] is None                                  # the TV payload carries no film year for it
     lib.set_item(m['id'], kind='movie')
     assert lib.by_id(m['id'])['year'] == 1982                 # a film again: its year is back
 
@@ -1873,16 +1875,6 @@ def test_an_untitled_file_made_an_episode_has_no_title_problem(lib, tmp_path):
     assert not lib.by_id(m['id'])['untitled']
 
 
-def test_typing_the_file_name_on_an_untitled_file_confirms_it(lib, tmp_path):
-    make(str(tmp_path / 'm'), '1080p.mkv', b'x' * 100)
-    lib.set_folders([{'path': str(tmp_path / 'm')}])
-    lib.scan()
-    m = lib.current()[0]
-    lib.set_item(m['id'], title='1080p')                       # "yes, call it that"
-    it = lib.by_id(m['id'])
-    assert it['typed_title'] and not it['untitled']
-
-
 def test_a_typed_title_the_new_numbers_match_goes_automatic(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1908,17 +1900,6 @@ def test_the_near_miss_hint_on_a_movie_follows_valid_overrides_only(lib, tmp_pat
     assert not lib.by_id(m['id'])['near_miss']
 
 
-
-def test_a_confirmed_file_name_made_an_episode_is_named_by_its_numbers(lib, tmp_path):
-    make(str(tmp_path / 'm'), '1080p.mkv', b'x' * 100)
-    lib.set_folders([{'path': str(tmp_path / 'm')}])
-    lib.scan()
-    m = lib.current()[0]
-    lib.set_item(m['id'], title='1080p')
-    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
-    assert lib.by_id(m['id'])['title'] == 'Home S01E01'
-
-
 def test_a_kids_toggle_doesnt_drop_a_typed_title(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1926,8 +1907,9 @@ def test_a_kids_toggle_doesnt_drop_a_typed_title(lib, tmp_path):
     ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
     lib.data['items'][ep['id']] = {'title': 'Ann Droid S01E02', 'episode': 2}   # stored typed, equal to auto
     lib._rebuild()
+    assert not lib.by_id(ep['id'])['typed_title']                              # drawn as automatic (no repeat)
     lib.set_item(ep['id'], kids=True)
-    assert lib.data['items'][ep['id']].get('title') == 'Ann Droid S01E02'      # a Kids toggle leaves it
+    assert lib.data['items'][ep['id']].get('title') == 'Ann Droid S01E02'      # a Kids toggle leaves it stored
 
 
 def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):

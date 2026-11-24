@@ -747,8 +747,7 @@ class Library:
         it['auto_last'] = it['episode_last']        # the file name's own second episode ('E01-E02'), if any
         it['auto_near_miss'] = it['near_miss']
         ov = self.data['items'].get(fp, {})
-        it['auto_untitled'] = it['untitled']
-        s, _auto_title, used = _resolve(it['auto'], it['auto_last'], ov, it['auto_untitled'])
+        s, _auto_title, used = _resolve(it['auto'], it['auto_last'], ov)
         it.update(s)
         if it['kind'] == 'episode' or used & {'title', 'kind'}:   # you named it or said "movie": no more hints
             it['near_miss'] = None
@@ -806,7 +805,7 @@ class Library:
             else:
                 ov[k] = v
         if cur is not None:
-            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov, cur.get('auto_untitled'))
+            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
             # an episode has no film year: a year sent for one isn't kept (the film year it had stays)
             if 'year' in fields and s['kind'] != 'episode':
                 if cur['auto'].get('year') == fields['year']:
@@ -817,11 +816,9 @@ class Library:
             # exactly that goes back to automatic (a typed title the new numbers now match does too); anything else
             # is kept as typed. A file PLAY couldn't name keeps a typed title even when it's the file name: that's
             # the answer to "set a title"
-            confirms_name = s['kind'] == 'movie' and cur.get('auto_untitled')
             v = fields.get('title', ov.get('title'))
-            renamed = bool(set(fields) & {'title', 'kind', 'show', 'season', 'episode'})   # (a Kids toggle isn't)
-            if renamed and ('title' in fields or 'title' in ov):
-                if v == auto_title and not confirms_name:
+            if 'title' in fields:
+                if v == auto_title:
                     ov.pop('title', None)
                 elif 'title' in fields:
                     ov['title'] = v
@@ -1050,7 +1047,7 @@ def _finite(v):
     return v if math.isfinite(v) else None
 
 
-def _resolve(auto, auto_last, ov, auto_untitled=False):
+def _resolve(auto, auto_last, ov):
     """(fields, auto_title, used): a title's kind, show, season, episode, second episode number, year, title and
     typed_title as PLAY uses them (the automatic values with the valid overrides on top; a bad hand-edited value is
     ignored, not fatal), the title it would have untyped, and the overrides that took effect. The one rule for
@@ -1074,9 +1071,10 @@ def _resolve(auto, auto_last, ov, auto_untitled=False):
         s['year'] = None                     # an episode has no film year (one made from a film drops it)
         used.discard('year')
         auto_title = _ep_title(s['show'], s['season'], s['episode'], s['episode_last'])
-        if auto_untitled and s.get('title') == auto.get('title'):
-            used.discard('title')            # a confirmed file name: as an episode it's named by its numbers
-    # the title follows the numbers (or the file name) unless one was typed
+    # the title follows the numbers (or the file name) unless one was typed; a stored title that is exactly the
+    # automatic one (the numbers changed to match it) reads as automatic
+    if 'title' in used and ov['title'] == auto_title:
+        used.discard('title')
     s['typed_title'] = 'title' in used
     if not s['typed_title']:
         s['title'] = auto_title

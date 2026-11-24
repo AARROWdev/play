@@ -1133,7 +1133,7 @@ class Window(QMainWindow):
         if old is None:
             self._say(GONE_NOTE)
             return False
-        if t and (t != old['title'] or old.get('untitled')):   # (the same name confirms one PLAY couldn't read)
+        if t and t != old['title']:
             self.lib.set_item(fid, title=t)
             self._saved(fid)
             return True
