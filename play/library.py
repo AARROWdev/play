@@ -861,9 +861,12 @@ class Library:
         """(fingerprints of the titles PLAY has now, those of them that are hidden): titles kept from a drive
         that's away aren't counted (a copy of one can be added from elsewhere). From what the last scan reached:
         no disk is touched."""
-        away = [os.path.normcase(p) for p in self.unreachable]
+        self._ensure_scanned()
+        with self.lock:
+            away = [os.path.normcase(p) for p in self.unreachable]
+            items = self._items
         have, hidden = set(), set()
-        for i in self._items:
+        for i in items:
             if away and _under(os.path.normcase(i['path']), away):
                 continue
             have.add(i['id'])

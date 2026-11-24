@@ -191,7 +191,7 @@ def copy_files(paths, folder, roots=(), progress=None, fingerprints=False, known
         if _inside(src, ids):
             dest = src                           # already in a media folder: PLAY lists it where it is (and marks it)
         elif fp is not None and fp in known:
-            failed.append((src, 'already in your library' + (' (hidden: see Hidden)' if fp in hidden else '')))
+            failed.append((src, 'already in your library' + (' (hidden: unhide it in the Hidden view)' if fp in hidden else '')))
             continue
         else:
             try:

@@ -1052,8 +1052,8 @@ class Window(QMainWindow):
         if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
             shown = self.lib.show_year(one['show']) if one and one['kind'] == 'episode' else (one or {}).get('year')
             self.d_year.setText(str(shown or '') if one else '')
+            self._year_kind = one['kind'] if one else None   # (only when the box is drawn: mid-typing keeps it)
         self._year_for = one['id'] if one else None
-        self._year_kind = one['kind'] if one else None
         same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
             self.d_title.setText(one['title'] if one else '')
@@ -1269,7 +1269,7 @@ class Window(QMainWindow):
                                 f'(PLAY leaves {human_size(SPARE)} free for Windows).')
             return
         box = QMessageBox(QMessageBox.Question, 'Add media',
-                          f'Copy {plural(len(paths), "file")} ({human_size(need)}) into {folder}?',
+                          f'Copy {plural(len(set(map(os.path.normcase, paths))), "file")} ({human_size(need)}) into {folder}?',
                           QMessageBox.Yes | QMessageBox.No, self)
         box.setTextFormat(Qt.PlainText)
         box.setInformativeText('They are copied: the originals stay where they are.')
@@ -1286,7 +1286,8 @@ class Window(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, 'Add media', f'Could not open {folder}: {e.strerror or e}')
             return
-        # what's in the library now: titles on a drive that's away, or hidden, can be added again from elsewhere
+        # what's in the library now (a title on a drive that's away can be added again from elsewhere; a hidden one
+        # is refused with a note saying so)
         known, hidden = self.lib.in_library()            # (from the last scan: no waiting on a sleeping drive)
         moved, failed = run_with_progress(self, 'Adding media', lambda progress: media.copy_files(
             paths, folder, roots, progress, fingerprints=kids, known=known, hidden=hidden), len(paths))

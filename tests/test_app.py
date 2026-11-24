@@ -1795,9 +1795,11 @@ def test_add_media_checks_the_first_scan_before_the_picker(win, monkeypatch):
 
 
 def test_a_year_typed_while_a_scan_changes_the_kind_isnt_saved(win):
+    from PySide6.QtTest import QTest
     film = next(i for i in win.lib._items if i['kind'] == 'movie')
     pick(win, film['title'])
-    win._year_kind = 'movie'
-    win.lib.set_item(film['id'], kind='episode', show='X', season=1, episode=1)   # a scan, say, makes it an episode
-    win.d_year.setText('1999')
+    win.d_year.selectAll()
+    QTest.keyClicks(win.d_year, '1999')                # typing (the box is modified) ...
+    win.lib.set_item(film['id'], kind='episode', show='X', season=1, episode=1)   # ... a change makes it an episode
+    win.refresh()                                       # ... and the redraw that follows
     assert win._save_year(film['id']) is False and win.lib.show_year('X') is None
