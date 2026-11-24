@@ -1511,7 +1511,7 @@ def _row_of(w, title):
 
 # Toy Shelf renamed Aardvark moves to the top: every row above it shifts down one (a redraw before the click
 # lands would put another film under the mouse)
-@pytest.mark.parametrize('film, box, keys', [('Toy Shelf', 'd_title', 'Aardvark'), ('Conor', 'd_year', '1999')])
+@pytest.mark.parametrize('film, box, keys', [('Toy Shelf', 'd_title', 'Aardvark')])   # (a year doesn't move a row)
 def test_typing_then_clicking_another_film_selects_that_film(win, film, box, keys):
     from PySide6.QtCore import Qt as _Qt
     from PySide6.QtTest import QTest
@@ -1543,3 +1543,51 @@ def test_nothing_selected_then_the_same_film_shows_its_title(win):
     win._sel_changed()
     pick(win, 'Conor')
     assert win.d_title.text() == 'Conor' and win.d_year.text() == '1982'
+
+
+
+# ------------------------------------------------------------------ c104ade review
+def test_a_refresh_while_typing_doesnt_save_half_a_title(win):
+    from PySide6.QtTest import QTest
+    win.resize(1000, 600)
+    win.show()
+    win.activateWindow()
+    if not QTest.qWaitForWindowActive(win):
+        pytest.skip('no active window on this platform')
+    pick(win, 'Conor')
+    conor = win.sel[0]['id']
+    win.d_title.setFocus()
+    win.d_title.selectAll()
+    QTest.keyClicks(win.d_title, 'Aardv')                # still typing ...
+    win.view.clearSelection()                           # ... and a background refresh drops the film from view
+    win._sel_changed()
+    assert win.lib.by_id(conor)['title'] == 'Conor'     # half a word isn't saved
+    win.hide()
+
+
+def test_saves_in_a_row_redraw_once(win, monkeypatch):
+    films = [i for i in win.lib._items if i['kind'] == 'movie'][:2]
+    calls = []
+    monkeypatch.setattr(win, 'refresh', lambda: calls.append(1))
+    for f in films:
+        pick(win, f['title'])
+        win.d_title.setText(f['title'] + ' X')
+        win._title_done()
+    QApplication.processEvents()
+    QApplication.processEvents()
+    assert len(calls) == 1
+
+
+def test_an_edit_for_a_film_thats_gone_says_so(win):
+    pick(win, 'Conor')
+    fid = win.sel[0]['id']
+    win.lib._by_id.pop(fid)                              # gone meanwhile
+    win.d_title.setText('New Name')
+    assert win._save_title(fid) is False and 'no longer in the library' in win._note[0]
+
+
+def test_after_a_save_the_panel_holds_the_saved_film(win):
+    pick(win, 'Conor')
+    win.d_title.setText('Conor Renamed')
+    win._title_done()
+    assert win.sel[0]['title'] == 'Conor Renamed'        # before the redraw

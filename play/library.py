@@ -559,7 +559,8 @@ class Library:
                     def spelled(t):
                         for rr, r in respell:
                             if t == rr or t.startswith(rr + os.sep):
-                                return r + t[len(rr):]
+                                out = r + t[len(rr):]
+                                return out + os.sep if out.endswith(':') else out   # a drive root: 'x:\'
                         return t
 
                     pending_targets = {p: [spelled(v[1]) for lk, v in links.items()
@@ -588,10 +589,9 @@ class Library:
                         pre = tuple(p.rstrip(os.sep) + os.sep for p in done)
                         # a pending link into another media folder: its files are listed under that folder's
                         # paths, so they're found by where the link leads
-                        # (both spellings: a file's real path, e[5], is matched against either)
-                        real_t = [v[1] for lk, v in links.items() if v[1] and any(lk == p or _under(lk, [p])
-                                                                                for p in done)]
-                        targets = real_t + [spelled(t) for t in real_t]
+                        # (a file's real path, e[5], is matched against where the link really leads)
+                        targets = [v[1] for lk, v in links.items() if v[1] and any(lk == p or _under(lk, [p])
+                                                                                 for p in done)]
                         tpre = tuple(t.rstrip(os.sep) + os.sep for t in targets)
                         tagged = False
                         for files in raw.values():
@@ -785,7 +785,8 @@ class Library:
         self.save()
 
     def set_item(self, fp, **fields):
-        """Override what PLAY read from the name. A value equal to the automatic one removes the override."""
+        """Override what PLAY read from the name. A value equal to the automatic one removes the override (an
+        episode's title: equal to the one its numbers give)."""
         self.set_items([fp], **fields)
 
     def set_items(self, fps, **fields):
@@ -811,8 +812,14 @@ class Library:
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
             keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('auto_near_miss'))
-            # an episode's title follows its numbers unless typed: a typed one stays, whatever it says
-            keep = keep or (k == 'title' and cur is not None and cur['kind'] == 'episode' and bool(v))
+            if k == 'title' and cur is not None and cur['kind'] == 'episode':
+                # an episode's title follows its numbers: typing the title they give (now) goes back to that,
+                # anything else is kept as typed (even when it reads like the file name)
+                if v == _ep_title(cur['show'], cur['season'], cur['episode'], cur.get('episode_last')):
+                    ov.pop(k, None)
+                else:
+                    ov[k] = v
+                continue
             if cur is not None and cur['auto'].get(k) == v and not keep:
                 ov.pop(k, None)
             else:
@@ -839,10 +846,13 @@ class Library:
         """The members of a collection a dialog didn't list (shown: the ids it listed) that a save keeps: films on
         a drive that's away. A film found in the library is kept too (it wasn't the dialog's to drop); one not found
         while every media folder could be read is gone for good."""
-        shown = set(shown)
-        return [m for m in self.data['collections'].get(cid, {}).get('members', [])
-                if m not in shown and ((self._by_id.get(m) or {}).get('kind') == 'movie'
-                                       if self._by_id.get(m) else self._incomplete)]
+        shown, by_id, incomplete = set(shown), self._by_id, self._incomplete   # (one look: a rebuild swaps it)
+        out = []
+        for m in self.data['collections'].get(cid, {}).get('members', []):
+            it = by_id.get(m)
+            if m not in shown and (it['kind'] == 'movie' if it is not None else incomplete):
+                out.append(m)
+        return out
 
     def update_collection(self, cid, name=None, order=None, members=None, shown=None):
         """members, when given, is the new order of the films the dialog showed (shown: the ids it listed when it

@@ -536,6 +536,12 @@ class Window(QMainWindow):
         self._title_for = None
         self._year_for = None
         self._note = None                                # (a passing note for the status bar, and until when)
+        # one redraw after a save, once the event that ended the typing is done (a click lands first); saves in a
+        # row restart it, so a gesture redraws once
+        self._redraw = QTimer(self)
+        self._redraw.setSingleShot(True)
+        self._redraw.setInterval(0)
+        self._redraw.timeout.connect(lambda: self.refresh())
         self._ep_dirty_for = None
         self._filling = False
         self._told = False
@@ -982,16 +988,18 @@ class Window(QMainWindow):
             return self._detail_for([])
         ids = self.selected_ids()
         now = ids[0] if len(ids) == 1 else None
-        saved = False
-        if self._year_for and self._year_for != now and self.d_year.isModified():
-            saved = self._save_year(self._year_for, redraw=False) or saved   # typed, then another film picked
+        # typed without Enter, then another film picked: saved. Not while the box still has the focus: then the
+        # selection moved without the user (a background refresh), and the text may be half typed
+        if self._year_for and self._year_for != now and self.d_year.isModified() and not self.d_year.hasFocus():
+            if self._save_year(self._year_for):
+                self._redraw.start()
             self.d_year.setModified(False)
-        if self._title_for and self._title_for != now and self.d_title.isModified():
-            saved = self._save_title(self._title_for) or saved
+        if self._title_for and self._title_for != now and self.d_title.isModified() and \
+                not self.d_title.hasFocus():
+            if self._save_title(self._title_for):
+                self._redraw.start()
             self.d_title.setModified(False)
-        if saved:
-            QTimer.singleShot(0, self.refresh)           # once, after this click is done (rows keep still now)
-        self._detail_for([self.lib.by_id(i) for i in self.selected_ids()])
+        self._detail_for([self.lib.by_id(i) for i in ids])
 
     def _ep_edited(self, *_):
         if len(self.sel) == 1 and not self._filling:
@@ -1064,17 +1072,30 @@ class Window(QMainWindow):
     YEARS = (names.FIRST_YEAR, 2100)                   # the first films to a little ahead
 
     def _year_done(self):
-        if len(self.sel) == 1 and self.sel[0]['kind'] == 'movie':
-            self._save_year(self.sel[0]['id'])
+        if len(self.sel) == 1 and self.sel[0]['kind'] == 'movie' and self._save_year(self.sel[0]['id']):
+            self._redraw.start()
         self.d_year.setModified(False)
 
-    def _save_year(self, fid, redraw=True):
+    def _gone(self, fid):
+        """The film an edit was for is no longer in the library: say so (the edit isn't saved)."""
+        self._note = ('That title is no longer in the library: the edit wasn\'t saved', time.monotonic() + 8)
+        self._status()
+
+    def _saved(self, fid):
+        """After a save: the panel's copy of the film is the saved one (the redraw comes a moment later)."""
+        new = self.lib.by_id(fid)
+        self.sel = [new if (i['id'] == fid and new is not None) else i for i in self.sel]
+
+    def _save_year(self, fid):
         """The Year box's text for the film fid: a year saves, empty clears it, anything else is put back.
-        True when saved. redraw False: the caller redraws."""
+        True when saved (the caller redraws)."""
         text = self.d_year.text().strip()
         film = self.lib.by_id(fid)
-        if film is None or film['kind'] != 'movie':
-            return
+        if film is None:
+            self._gone(fid)
+            return False
+        if film['kind'] != 'movie':
+            return False
         # ASCII digits only: '²' or '١' pass isdigit() and int() refuses or misreads them
         year = int(text) if text.isascii() and text.isdigit() else None
         if text and (year is None or not self.YEARS[0] <= year <= self.YEARS[1]):
@@ -1083,8 +1104,7 @@ class Window(QMainWindow):
             self._status()
         elif year != film.get('year'):                         # (empty: no year)
             self.lib.set_item(fid, year=year)
-            if redraw:
-                QTimer.singleShot(0, self.refresh)  # (after the event that ended the typing: a click lands first)
+            self._saved(fid)
             return True
         return False
 
@@ -1092,8 +1112,12 @@ class Window(QMainWindow):
         """The title box's text for fid, if it's a change. True when saved (the caller redraws)."""
         t = self.d_title.text().strip()
         old = self.lib.by_id(fid)
-        if t and old is not None and t != old['title']:
+        if old is None:
+            self._gone(fid)
+            return False
+        if t and t != old['title']:
             self.lib.set_item(fid, title=t)
+            self._saved(fid)
             return True
         return False
 
@@ -1101,7 +1125,7 @@ class Window(QMainWindow):
         changed = len(self.sel) == 1 and self._save_title(self.sel[0]['id'])
         self.d_title.setModified(False)          # Enter, changed or not: the box follows the title again
         if changed:
-            QTimer.singleShot(0, self.refresh)    # (after the event that ended the typing: a click lands first)
+            self._redraw.start()
 
     def _set_kind(self, kind):
         if kind == 'movie':

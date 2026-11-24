@@ -1566,9 +1566,17 @@ def test_years_from_1870_read_as_years():
 
 
 def _free_letter():
-    import string
-    used = {d[0].upper() for d in os.popen('wmic logicaldisk get name 2>nul').read().split() if d[1:2] == ':'}
-    for c in reversed(string.ascii_uppercase[3:]):
+    """A letter nothing uses, remembered network drives included (they can be disconnected and still matter)."""
+    import ctypes
+    import winreg
+    used = {chr(65 + i) for i in range(26) if ctypes.windll.kernel32.GetLogicalDrives() >> i & 1}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Network') as k:   # remembered mapped drives
+            used |= {winreg.EnumKey(k, i).upper() for i in range(winreg.QueryInfoKey(k)[0])}
+    except OSError:
+        pass
+    used |= {w[0].upper() for w in os.popen('net use 2>nul').read().split() if len(w) == 2 and w[1] == ':'}
+    for c in 'QJKRTSPOLNM':                          # rarely used letters first (network drives favour the end)
         if c not in used and not os.path.exists(c + ':' + os.sep):
             return c
     pytest.skip('no free drive letter')
@@ -1597,6 +1605,76 @@ def test_a_pending_link_into_a_drive_root_media_folder_waits_for_settling(tmp_pa
         monkeypatch.setattr(library, 'SETTLE', 3600)
         lb.scan()
         assert lb.data['kids_pending']                # still settling under X:\Animated: later
+        monkeypatch.setattr(library, 'SETTLE', 0)
+        lb.scan()
+        assert lb.data['kids_pending'] == []
+        assert next(i for i in lb.current() if i['title'] == 'Cars 2')['kids']
+    finally:
+        subprocess.run(['subst', letter + ':', '/d'], capture_output=True)
+
+
+
+def test_typing_an_episodes_own_number_title_follows_the_numbers_again(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], title='The Pool')
+    assert lib.by_id(ep['id'])['typed_title']
+    lib.set_item(ep['id'], title='Ann Droid S01E02')           # the numbers' title again: automatic
+    assert not lib.by_id(ep['id'])['typed_title']
+    lib.set_item(ep['id'], episode=3)
+    assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E03'  # follows the new numbers
+    lib.set_item(ep['id'], title='Ann Droid S01E02')           # reads like the file name, not the numbers: typed
+    assert lib.by_id(ep['id'])['typed_title'] and lib.by_id(ep['id'])['title'] == 'Ann Droid S01E02'
+
+
+def test_kept_unshown_keeps_away_films_and_drops_gone_ones(lib, tmp_path, monkeypatch):
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv', b'heat' * 100)
+    make(str(tmp_path / 'm'), 'Ronin 1998.mkv', b'ronin' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    a, b = [i['id'] for i in lib.current()]
+    cid = lib.make_collection('Crime', [a, b])
+    lib.data['collections'][cid]['members'].append('feedfeedfeedfeed')   # not found this scan
+    assert lib.kept_unshown(cid, [a]) == [b]                             # all folders read: gone for good
+    monkeypatch.setattr(lib, '_incomplete', True)
+    assert lib.kept_unshown(cid, [a]) == [b, 'feedfeedfeedfeed']         # a folder away: kept
+
+
+def test_a_typed_title_changes_the_digest(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    before = lib._digest()
+    ep_item = next(i for i in lib._items if i['id'] == ep['id'])
+    ep_item['typed_title'] = True                                        # (the same title, now typed)
+    assert lib._digest() != before
+
+
+def test_a_pending_link_to_a_drive_roots_own_folder_waits_for_its_settling_files(tmp_path, monkeypatch):
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    movies = tmp_path / 'Movies'
+    make(str(movies), 'Cars 2006.mkv', b'cars' * 50)
+    _junction(kids / 'All', movies)                   # the link leads to the drive root itself (x:\ exactly)
+    letter = _free_letter()
+    if subprocess.run(['subst', letter + ':', str(movies)], capture_output=True).returncode:
+        pytest.skip('subst unavailable')
+    try:
+        store = tmp_path / 'store'
+        store.mkdir()
+        (store / 'library.json').write_text(json.dumps({'folders': [{'path': letter + ':' + os.sep},
+                                                                    {'path': str(kids)}]}), encoding='utf-8')
+        lb = library.Library(str(store))
+        monkeypatch.setattr(library, 'SETTLE', 0)
+        lb.items(0)
+        make(str(movies), 'Cars 2 2011.mkv', b'cars2' * 60)   # settling at the root
+        lb.data['kids_pending'] = [os.path.normcase(str(kids / 'All'))]
+        monkeypatch.setattr(library, 'SETTLE', 3600)
+        lb.scan()
+        assert lb.data['kids_pending']                # x:\ has a file still settling: later
         monkeypatch.setattr(library, 'SETTLE', 0)
         lb.scan()
         assert lb.data['kids_pending'] == []
