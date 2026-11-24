@@ -1884,6 +1884,28 @@ def test_a_typed_title_the_new_numbers_match_goes_automatic(lib, tmp_path):
     assert lib.by_id(ep['id'])['typed_title']
     lib.set_item(ep['id'], episode=3)                          # now the numbers give exactly that
     assert not lib.by_id(ep['id'])['typed_title']
+    lib.set_item(ep['id'], episode=4)                          # and a later renumber doesn't bring it back
+    assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E04' and not lib.by_id(ep['id'])['typed_title']
+
+
+def test_a_film_titled_like_its_episode_form_is_itself_again_as_a_film(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.set_item(m['id'], title='Home S01E01')
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)   # the typed title is now automatic
+    lib.set_item(m['id'], kind='movie')
+    assert lib.by_id(m['id'])['title'] == 'Home Movie'
+
+
+def test_enter_on_an_untitled_files_own_name_keeps_the_warning(lib, tmp_path):
+    make(str(tmp_path / 'm'), '1080p.mkv', b'x' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.set_item(m['id'], title='1080p')                       # the same name: nothing to confirm (dropped feature)
+    assert lib.by_id(m['id'])['untitled'] and not lib.by_id(m['id'])['typed_title']
 
 
 def test_the_near_miss_hint_on_a_movie_follows_valid_overrides_only(lib, tmp_path):

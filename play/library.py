@@ -813,15 +813,16 @@ class Library:
                 else:
                     ov['year'] = fields['year']
             # the title this edit leaves automatic (an episode: from its numbers, as the edit leaves them). Typing
-            # exactly that goes back to automatic (a typed title the new numbers now match does too); anything else
-            # is kept as typed. A file PLAY couldn't name keeps a typed title even when it's the file name: that's
-            # the answer to "set a title"
-            v = fields.get('title', ov.get('title'))
+            # exactly that goes back to automatic; anything else is kept as typed. An edit that renames or renumbers
+            # also drops a stored title it makes automatic, so a later renumber doesn't bring it back (a Kids or
+            # Hide toggle leaves the stored title alone)
             if 'title' in fields:
-                if v == auto_title:
+                if fields['title'] == auto_title:
                     ov.pop('title', None)
-                elif 'title' in fields:
-                    ov['title'] = v
+                else:
+                    ov['title'] = fields['title']
+            elif set(fields) & {'kind', 'show', 'season', 'episode'} and ov.get('title') == auto_title:
+                ov.pop('title', None)
         if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
             self.data['items'][fp] = ov
         else:

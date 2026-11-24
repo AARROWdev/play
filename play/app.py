@@ -1133,6 +1133,8 @@ class Window(QMainWindow):
         if old is None:
             self._say(GONE_NOTE)
             return False
+        if t and t == old['title'] and old.get('untitled'):
+            self._say("PLAY couldn't read a title from this file name: type the title you want")
         if t and t != old['title']:
             self.lib.set_item(fid, title=t)
             self._saved(fid)
