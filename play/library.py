@@ -747,13 +747,12 @@ class Library:
         it['auto_last'] = it['episode_last']        # the file name's own second episode ('E01-E02'), if any
         it['auto_near_miss'] = it['near_miss']
         ov = self.data['items'].get(fp, {})
-        s = _resolve(it['auto'], it['auto_last'], ov)
-        used = s.pop('used')
-        s.pop('auto_title')
+        it['auto_untitled'] = it['untitled']
+        s, _auto_title, used = _resolve(it['auto'], it['auto_last'], ov)
         it.update(s)
         if it['kind'] == 'episode' or used & {'title', 'kind'}:   # you named it or said "movie": no more hints
             it['near_miss'] = None
-        if it['typed_title']:
+        if it['typed_title'] or it['kind'] == 'episode':          # (an episode is named by its numbers)
             it['untitled'] = False
         # only a movie is in a collection: one turned into an episode drops out of it (and can't be stuck there)
         it['collection'] = self._col_of.get(fp) if it['kind'] == 'movie' else None
@@ -806,16 +805,26 @@ class Library:
                 ov.pop(k, None)
             else:
                 ov[k] = v
-        if 'year' in fields and cur is not None and _resolve(cur['auto'], cur.get('auto_last'), ov)['kind'] == 'episode':
-            ov.pop('year', None)                 # an episode has no film year: a year sent for one isn't kept
-        if 'title' in fields and cur is not None:
-            # the title the rest of this edit gives automatically (an episode: from its numbers, as the edit leaves
-            # them); typing exactly that goes back to automatic, anything else is kept as typed
-            v = fields['title']
-            if v == _resolve(cur['auto'], cur.get('auto_last'), ov)['auto_title']:
-                ov.pop('title', None)
-            else:
-                ov['title'] = v
+        if cur is not None:
+            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
+            stored = self.data['items'].get(fp, {})
+            if 'year' in fields and s['kind'] == 'episode':
+                # an episode has no film year: a year sent for one isn't kept, and the film year it had stays
+                if 'year' in stored:
+                    ov['year'] = stored['year']
+                else:
+                    ov.pop('year', None)
+            # the title this edit leaves automatic (an episode: from its numbers, as the edit leaves them). Typing
+            # exactly that goes back to automatic (a typed title the new numbers now match does too); anything else
+            # is kept as typed. A file PLAY couldn't name keeps a typed title even when it's the file name: that's
+            # the answer to "set a title"
+            confirms_name = s['kind'] == 'movie' and cur.get('auto_untitled')
+            v = fields.get('title', ov.get('title'))
+            if 'title' in fields or 'title' in ov:
+                if v == auto_title and not confirms_name:
+                    ov.pop('title', None)
+                elif 'title' in fields:
+                    ov['title'] = v
         if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
             self.data['items'][fp] = ov
         else:
@@ -1042,9 +1051,10 @@ def _finite(v):
 
 
 def _resolve(auto, auto_last, ov):
-    """A title's kind, show, season, episode, second episode number and year as PLAY uses them: the automatic
-    values with the valid overrides on top (a bad hand-edited value is ignored, not fatal). The one rule for drawing
-    a title and for judging an edit."""
+    """(fields, auto_title, used): a title's kind, show, season, episode, second episode number, year, title and
+    typed_title as PLAY uses them (the automatic values with the valid overrides on top; a bad hand-edited value is
+    ignored, not fatal), the title it would have untyped, and the overrides that took effect. The one rule for
+    drawing a title and for judging an edit."""
     s = dict(auto)
     used = {k for k in OVERRIDABLE if k in ov and valid(k, ov[k])}   # (a bad hand-edited value counts as none)
     for k in used:
@@ -1054,18 +1064,19 @@ def _resolve(auto, auto_last, ov):
     if s['kind'] == 'episode' and not (s.get('show') and isinstance(s.get('season'), int)
                                        and isinstance(s.get('episode'), int)):
         s['kind'] = 'movie'                  # an override that turned it into an episode without the details
+    if s['kind'] != ov.get('kind', s['kind']):
+        used.discard('kind')                 # (a kind that couldn't apply, e.g. an episode with no details)
     if s['kind'] == 'movie':
         s['show'] = s['season'] = s['episode'] = s['episode_last'] = None
-        s['auto_title'] = auto.get('title')
+        auto_title = auto.get('title')
     else:
         s['year'] = None                     # an episode has no film year (one made from a film drops it)
-        s['auto_title'] = _ep_title(s['show'], s['season'], s['episode'], s['episode_last'])
+        auto_title = _ep_title(s['show'], s['season'], s['episode'], s['episode_last'])
     # the title follows the numbers (or the file name) unless one was typed
     s['typed_title'] = 'title' in used
     if not s['typed_title']:
-        s['title'] = s['auto_title']
-    s['used'] = used
-    return s
+        s['title'] = auto_title
+    return s, auto_title, used
 
 
 def _folder(p):
