@@ -134,6 +134,43 @@ T 'first copy still serving' { (Invoke-RestMethod http://127.0.0.1:8600/api/info
 T 'only one PLAY running' { $n = @(Get-Process PLAY -ErrorAction SilentlyContinue).Count; Verdict ($n -eq 1) "$n running" }
 T 'media files unchanged (names, case and contents)' { (MediaState) -ceq $before }
 
+# Add media, driven like a person would: click the button, type a path into the file dialog, answer Yes. The file must
+# be COPIED into the default (first) folder; the original has to stay where it is, byte for byte.
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int dx, int dy, int d, int e);' -Name Mouse -Namespace Win
+$srcDir = 'C:\Src'
+$src = "$srcDir\Added Film (2005).mp4"
+New-Item -ItemType Directory -Force $srcDir | Out-Null
+[IO.File]::WriteAllBytes($src, [byte[]](3..240) * 5000)
+(Get-Item $src).LastWriteTime = (Get-Date).AddHours(-1)
+$srcHash = (Get-FileHash $src -Algorithm SHA256).Hash
+$copy = "$media\Movies\Added Film (2005).mp4"
+$ae = [System.Windows.Automation.AutomationElement]
+$win = $ae::FromHandle((Get-Process -Id $firstPid).MainWindowHandle)
+$byName = New-Object System.Windows.Automation.PropertyCondition($ae::NameProperty, ('Add media' + [char]0x2026))
+$btn = $win.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $byName)
+T 'the Add media button is in the window' { $null -ne $btn }
+if ($btn) {
+    $r = $btn.Current.BoundingRectangle
+    [void][Win.Mouse]::SetCursorPos([int]($r.X + $r.Width / 2), [int]($r.Y + $r.Height / 2))
+    Start-Sleep -Milliseconds 300
+    [Win.Mouse]::mouse_event(2, 0, 0, 0, 0); [Win.Mouse]::mouse_event(4, 0, 0, 0, 0)    # left down, up
+    Start-Sleep 4                                                                       # the file dialog opens with its name box focused
+    [System.Windows.Forms.SendKeys]::SendWait(($src -replace '[\+\^%~(){}\[\]]', '{$0}') + '{ENTER}')
+    Start-Sleep 3                                                                       # "Copy 1 file ... into ...?" (Yes is the default)
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+}
+T 'Add media copied the file into the default folder' {
+    $ok = WaitFor { Test-Path -LiteralPath $copy } 30
+    Verdict ($ok -and ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -eq $srcHash)) "copy exists: $ok"
+}
+T 'Add media left the original in place, unchanged' { Verdict ((Test-Path -LiteralPath $src) -and ((Get-FileHash $src -Algorithm SHA256).Hash -eq $srcHash)) "original exists: $(Test-Path -LiteralPath $src)" }
+T 'the added film shows up in the library' {
+    $found = WaitFor { try { @((Invoke-RestMethod 'http://127.0.0.1:8600/api/tv?side=home' -TimeoutSec 5).movies | Where-Object { $_.title -eq 'Added Film' }).Count -eq 1 } catch { $false } } 60
+    Verdict $found "listed: $found"
+}
+$before = MediaState                                      # (the media folder now holds the added copy)
+
 # the uninstaller refuses while PLAY runs (silent = no prompt)
 T 'uninstaller refuses while PLAY runs' {
     $un = Start-Process "$env:ProgramFiles\PLAY\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
