@@ -1928,7 +1928,7 @@ def test_a_left_over_automatic_title_is_dropped_by_the_next_renumber(lib, tmp_pa
     lib.scan()
     ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
     lib.data['items'][ep['id']] = {'title': 'Ann Droid S01E03'}   # stored, but it reads as automatic already
-    lib._rebuild()
+    lib.scan()                                                    # (what a start does: old titles are migrated)
     lib.set_item(ep['id'], episode=4)
     assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E04'
 
@@ -2017,3 +2017,23 @@ def test_a_padded_hand_edited_show_reads_stripped(lib, tmp_path):
     lib.data['items'][ep['id']] = {'show': ' Ann Droid '}
     lib._rebuild()
     assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E02'
+
+
+
+def test_old_titles_are_stamped_or_dropped_once(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E03.mkv', b'three' * 100)
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv', b'h' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    film = next(i for i in lib.current() if i['title'] == 'Heat')
+    lib.data['items'][ep['id']] = {'title': ' Ann Droid S01E03 '}   # old, padded, automatic: a left-over
+    lib.data['items'][film['id']] = {'title': "Heat (Director's Cut)"}   # old and typed
+    lib.scan()
+    assert 'title' not in lib.data['items'].get(ep['id'], {})
+    assert lib.data['items'][film['id']]['title_kind'] == 'movie'
+    lib.set_item(ep['id'], episode=4)
+    assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E04'
+    lib.set_item(film['id'], kind='episode', show='Heat', season=1, episode=1)
+    lib.set_item(film['id'], kind='movie')
+    assert lib.by_id(film['id'])['title'] == "Heat (Director's Cut)"   # an old typed film title survives a kind trip

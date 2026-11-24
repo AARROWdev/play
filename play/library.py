@@ -288,6 +288,25 @@ class Library:
             except OSError:
                 pass
 
+    def _stamp_titles(self):
+        """Titles stored before PLAY recorded the kind a title was typed for: one that reads as automatic is
+        dropped, the rest get the kind they're on now. Once per title (titles found this scan); True if any
+        changed."""
+        changed = False
+        for fp, ov in self.data['items'].items():
+            if 'title' not in ov or 'title_kind' in ov:
+                continue
+            cur = self._by_id.get(fp)
+            if cur is None:
+                continue                             # not found now: when it's read again
+            s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
+            if isinstance(ov['title'], str) and ov['title'].strip() == auto_title:
+                del ov['title']
+            else:
+                ov['title_kind'] = s['kind']
+            changed = True
+        return changed
+
     def _migrate_old_episode_titles(self):
         """Early builds stored "<Show> SxxEyy" as a title override whenever an episode was set. That froze the
         title; drop such overrides so the title follows the numbers again (a title you typed yourself is kept)."""
@@ -531,6 +550,9 @@ class Library:
                 if sig != self._raw_sig or first:
                     self._raw_sig = sig
                     self._rebuild()                  # nothing new on disk: the items stand as they are
+                if self._stamp_titles():
+                    self._rebuild()
+                    self._save_after_scan = True
                 # Kids is marked per title now: a Kids folder from older settings has just tagged its files
                 # (once each, as before); from here on it is an ordinary folder, so a film added there later isn't
                 # Kids unless it's marked
@@ -805,9 +827,6 @@ class Library:
             else:
                 ov[k] = v
         if cur is not None:
-            stored = self.data['items'].get(fp, {})
-            if 'title' in stored and 'title_kind' not in stored and                     stored['title'] == _resolve(cur['auto'], cur.get('auto_last'), stored)[1]:
-                ov.pop('title', None)            # stored before titles recorded their kind, and automatic: a left-over
             s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
             # an episode has no film year: a year sent for one isn't kept (the film year it had stays)
             if 'year' in fields and s['kind'] != 'episode':
