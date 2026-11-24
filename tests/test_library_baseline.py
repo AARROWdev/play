@@ -1909,17 +1909,16 @@ def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
     assert s['kind'] == 'episode' and 'year' not in used
 
 
-def test_a_typed_title_survives_a_kind_round_trip(lib, tmp_path):
+def test_a_typed_title_a_kind_change_makes_automatic_is_forgotten(lib, tmp_path):
     make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
     m = lib.current()[0]
     lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
     lib.set_item(m['id'], title='Home Movie')                  # typed on the episode: the film's own name
-    lib.set_item(m['id'], kind='movie')                        # a kind change alone keeps it ...
+    lib.set_item(m['id'], kind='movie')                        # a film again: it's the automatic name, forgotten
     lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
-    it = lib.by_id(m['id'])
-    assert it['title'] == 'Home Movie' and it['typed_title']   # ... back as an episode, still yours
+    assert lib.by_id(m['id'])['title'] == 'Home S01E01'
 
 
 def test_a_left_over_automatic_title_is_dropped_by_the_next_renumber(lib, tmp_path):
@@ -1998,15 +1997,15 @@ def test_a_films_old_stored_automatic_title_reads_automatic(lib, tmp_path):
     assert not lib.by_id(m['id'])['typed_title']
 
 
-def test_a_film_typed_like_an_episode_keeps_its_title_through_a_round_trip(lib, tmp_path):
+def test_a_typed_title_that_becomes_automatic_is_forgotten(lib, tmp_path):
     make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
     m = lib.current()[0]
     lib.set_item(m['id'], title='Home S01E01')                 # typed on the film
-    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)   # matches it as an episode
-    lib.set_item(m['id'], kind='movie')
-    assert lib.by_id(m['id'])['title'] == 'Home S01E01' and lib.by_id(m['id'])['typed_title']
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)   # now it's the automatic title
+    lib.set_item(m['id'], episode=2)                           # forgotten: it follows the numbers
+    assert lib.by_id(m['id'])['title'] == 'Home S01E02' and not lib.by_id(m['id'])['typed_title']
 
 
 def test_a_padded_hand_edited_show_reads_stripped(lib, tmp_path):

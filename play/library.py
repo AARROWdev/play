@@ -834,12 +834,10 @@ class Library:
                     ov.pop('year', None)
                 else:
                     ov['year'] = fields['year']
-            # Typed versus automatic is decided here, when a title is written, never guessed later. Typing the title
-            # this edit leaves automatic (an episode: from its numbers) goes back to automatic; anything else is
-            # stored with the kind it was typed for. A stored title that this edit makes automatic for that same
-            # kind (a film's name, or an episode renumbered to match) was the automatic one all along and is
-            # dropped, so a later renumber can't bring it back; for another kind (a film's typed name that matches
-            # it as an episode) it stays yours and reads as automatic only while it matches.
+            # Typed versus automatic is decided here, when a title is written. Typing the title this edit leaves
+            # automatic (an episode: from its numbers) goes back to automatic; anything else is stored as typed. A
+            # typed title that an edit makes exactly the automatic one, film or episode, is forgotten: you meant that
+            # title, so it follows the numbers or the file name from then on
             if 'title' in fields:
                 if fields['title'] == auto_title:
                     ov.pop('title', None)
@@ -847,7 +845,7 @@ class Library:
                 else:
                     ov['title'] = fields['title']
                     ov['title_kind'] = s['kind']
-            elif 'title' in ov and ov['title'] == auto_title and ov.get('title_kind', s['kind']) == s['kind']:
+            elif 'title' in ov and ov['title'] == auto_title:
                 ov.pop('title', None)
                 ov.pop('title_kind', None)
         if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
