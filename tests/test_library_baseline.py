@@ -1761,7 +1761,8 @@ def test_a_typed_automatic_title_after_a_hand_edited_episode_override(lib, tmp_p
     ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
     lib.data['items'][ep['id']] = {'episode': 1}      # an override equal to automatic (a hand edit)
     lib._rebuild()
-    shown = lib.by_id(ep['id'])['title']              # what PLAY shows for it now
+    shown = lib.by_id(ep['id'])['title']
+    assert shown == 'Ann Droid S01E01-E02'            # the same number: the file's second one still applies
     lib.set_item(ep['id'], title=shown)
     assert not lib.by_id(ep['id'])['typed_title']     # the title shown, typed back, stays automatic
 
@@ -1775,3 +1776,26 @@ def test_a_movie_back_to_episode_with_its_own_title(lib, tmp_path):
     lib.set_item(ep['id'], kind='episode', title='Ann Droid S01E01-E02')
     it = lib.by_id(ep['id'])
     assert it['kind'] == 'episode' and not it['typed_title']
+
+
+
+def test_a_bad_hand_edited_season_is_ignored_when_judging_a_typed_title(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'season': 'two'}  # not a number: ignored when drawing
+    lib._rebuild()
+    lib.set_item(ep['id'], title=lib.by_id(ep['id'])['title'])
+    assert not lib.by_id(ep['id'])['typed_title']
+
+
+def test_kind_movie_answering_a_near_miss_is_kept_with_a_title_in_the_same_edit(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Ep 1 of the Road 2001.mkv', b'p' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    if not m.get('auto_near_miss'):
+        pytest.skip('this name is not flagged as a near miss')
+    lib.set_item(m['id'], kind='movie', title=m['title'] + ' X')
+    assert lib.data['items'][m['id']].get('kind') == 'movie'   # the answer to the hint is kept

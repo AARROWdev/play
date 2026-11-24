@@ -1559,13 +1559,26 @@ def _search_away(win):
     win.refresh()
 
 
-def test_a_refresh_while_typing_doesnt_save_half_a_title(win):
+@pytest.mark.parametrize('focused', [False, True])
+def test_a_refresh_while_typing_doesnt_save_half_a_title(win, focused):
     from PySide6.QtTest import QTest
+    if focused:                                         # (hiding the panel mid-redraw fires editingFinished)
+        win.resize(1000, 600)
+        win.show()
+        win.activateWindow()
+        if not QTest.qWaitForWindowActive(win):
+            pytest.skip('no active window on this platform')
     pick(win, 'Conor')
     conor = win.sel[0]['id']
+    if focused:
+        win.d_title.setFocus()
+        QApplication.processEvents()
+        assert win.d_title.hasFocus()
     win.d_title.selectAll()
     QTest.keyClicks(win.d_title, 'Aardv')                # still typing ...
     _search_away(win)                                   # ... and a redraw drops the film from view
+    assert win.sel == [] and "wasn't saved" in (win._note or ('',))[0]   # (the search did drop it)
+    win.hide()
     assert win.lib.by_id(conor)['title'] == 'Conor'     # half a word isn't saved
     assert 'title' not in win.lib.data['items'].get(conor, {})
 
