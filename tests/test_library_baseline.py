@@ -2036,3 +2036,21 @@ def test_old_titles_are_stamped_or_dropped_once(lib, tmp_path):
     lib.set_item(film['id'], kind='episode', show='Heat', season=1, episode=1)
     lib.set_item(film['id'], kind='movie')
     assert lib.by_id(film['id'])['title'] == "Heat (Director's Cut)"   # an old typed film title survives a kind trip
+
+
+
+def test_a_show_year_is_set_once_and_reaches_the_tv(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E01.mkv', b'one' * 100)
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    lib.set_show_year('Ann Droid', 2026)
+    assert lib.show_year('ann droid') == 2026                    # (one show, however it's spelled)
+    show = next(s for s in lib.tv_view(kids=False)['shows'] if s['name'] == 'Ann Droid')
+    assert show['year'] == 2026
+    assert all(e['year'] is None for se in show['seasons'] for e in se['episodes'])   # episodes stay year-less
+    lib.set_show_year('Ann Droid', None)
+    assert lib.show_year('Ann Droid') is None
+    lib2 = library.Library(lib.dir)                              # kept across a restart
+    lib.set_show_year('Ann Droid', 2026)
+    assert library.Library(lib.dir).data['show_years'] == {names.show_key('Ann Droid'): 2026}

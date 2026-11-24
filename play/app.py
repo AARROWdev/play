@@ -680,7 +680,8 @@ class Window(QMainWindow):
         self.d_title.editingFinished.connect(self._title_done)
         v.addWidget(self.d_title)
         yr = QHBoxLayout()
-        yr.addWidget(QLabel('Year'))
+        self.d_year_label = QLabel('Year')
+        yr.addWidget(self.d_year_label)
         self.d_year = QLineEdit()
         self.d_year.setPlaceholderText('none')
         self.d_year.setMaxLength(4)
@@ -908,7 +909,8 @@ class Window(QMainWindow):
         coll = self.lib.data['collections'].get(i['collection'], {}).get('name', '') if i['collection'] else ''
         season = 'Specials' if i.get('season') == 0 else f"Season {i.get('season')}"
         where = f"{i['show']} · {season}" if i['kind'] == 'episode' else coll
-        cells = [i['title'], 'Episode' if i['kind'] == 'episode' else 'Movie', where, str(i.get('year') or ''),
+        year = self.lib.show_year(i['show']) if i['kind'] == 'episode' else i.get('year')   # (an episode: its show's)
+        cells = [i['title'], 'Episode' if i['kind'] == 'episode' else 'Movie', where, str(year or ''),
                  i['format'].upper(), human_size(i['size']),
                  'Yes' if i['roku_ok'] else 'Check']
         row = [QStandardItem(c) for c in cells]
@@ -1041,9 +1043,11 @@ class Window(QMainWindow):
             return
         self.d_heading.setText(one['title'] if one else f'{len(its)} titles')
         self.d_title.setEnabled(bool(one))
-        self.d_year.setEnabled(bool(one) and one['kind'] == 'movie')
+        self.d_year.setEnabled(bool(one))                # (a film's year, or for an episode its show's)
+        self.d_year_label.setText('Show year' if one and one['kind'] == 'episode' else 'Year')
         if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
-            self.d_year.setText(str(one.get('year') or '') if one else '')   # (an episode's year is None)
+            shown = self.lib.show_year(one['show']) if one and one['kind'] == 'episode' else (one or {}).get('year')
+            self.d_year.setText(str(shown or '') if one else '')
         self._year_for = one['id'] if one else None
         same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing
@@ -1113,16 +1117,18 @@ class Window(QMainWindow):
         if film is None:
             self._say(GONE_NOTE)
             return False
-        if film['kind'] != 'movie':
-            self._say('That\'s an episode now (years are for films): the year wasn\'t saved')
-            return False
+        episode = film['kind'] == 'episode'                    # (an episode: the box is its show's year)
+        old = self.lib.show_year(film['show']) if episode else film.get('year')
         # ASCII digits only: '²' or '١' pass isdigit() and int() refuses or misreads them
         year = int(text) if text.isascii() and text.isdigit() else None
         if text and (year is None or not self.YEARS[0] <= year <= self.YEARS[1]):
-            self.d_year.setText(str(film.get('year') or ''))    # not a year: back as it was
+            self.d_year.setText(str(old or ''))                # not a year: back as it was
             self._say(f'"{text}" is not a year ({self.YEARS[0]}-{self.YEARS[1]})')
-        elif year != film.get('year'):                         # (empty: no year)
-            self.lib.set_item(fid, year=year)
+        elif year != old:                                      # (empty: no year)
+            if episode:
+                self.lib.set_show_year(film['show'], year)
+            else:
+                self.lib.set_item(fid, year=year)
             self._saved(fid)
             return True
         return False

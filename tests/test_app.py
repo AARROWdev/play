@@ -1263,7 +1263,7 @@ def test_the_year_box_sets_a_films_year(win):
     assert not win.lib.by_id(film['id']).get('year')
     episode = next(i for i in win.lib._items if i['kind'] == 'episode')
     win._detail_for([episode])
-    assert not win.d_year.isEnabled()               # (episodes: no year box)
+    assert win.d_year.isEnabled() and win.d_year_label.text() == 'Show year'   # (an episode: its show's year)
 
 
 def test_select_all_shown_counts_once(win, monkeypatch):
@@ -1641,11 +1641,11 @@ def test_a_sync_refresh_cancels_the_pending_redraw(win):
     assert not win._redraw.isActive()
 
 
-def test_a_year_for_a_film_that_became_an_episode_says_so(win):
+def test_a_year_typed_on_an_episode_is_its_shows_year(win):
     ep = next(i for i in win.lib._items if i['kind'] == 'episode')
     win.d_year.setText('1999')
-    win.d_year.setModified(True)
-    assert win._save_year(ep['id']) is False and 'episode' in win._note[0]
+    assert win._save_year(ep['id']) is True and win.lib.show_year(ep['show']) == 1999
+    assert win.lib.by_id(ep['id'])['year'] is None
 
 
 def test_the_heading_follows_a_saved_title(win):
@@ -1750,3 +1750,17 @@ def test_add_media_refuses_when_the_drive_is_too_full(win, tmp_path, monkeypatch
     win.add_media()
     assert told and 'Not enough space' in told[-1] and asked == []
     assert not os.path.exists(os.path.join(win.lib.default_folder, 'Up 2009.mkv'))
+
+
+
+def test_the_year_box_sets_an_episodes_show_year(win):
+    ep = next(i for i in win.lib._items if i['kind'] == 'episode')
+    pick(win, ep['title'])
+    assert win.d_year.isEnabled() and win.d_year_label.text() == 'Show year'
+    win.d_year.setText('2026')
+    win.d_year.setModified(True)
+    win._year_done()
+    assert win.lib.show_year(ep['show']) == 2026
+    assert win.lib.by_id(ep['id'])['year'] is None                 # the episode itself has no film year
+    pick(win, ep['title'])
+    assert win.d_year.text() == '2026'

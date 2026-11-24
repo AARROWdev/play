@@ -372,7 +372,7 @@ end sub
 sub showShows()
     titles = []
     for each s in m.shows
-        titles.Push(s.name)
+        if s.year <> invalid then titles.Push(s.name + "   (" + s.year.ToStr() + ")") else titles.Push(s.name)
     end for
     setList("shows", m.lib + "  ›  SHOWS", titles, m.shows, plural(m.shows.Count(), "show"))
 end sub

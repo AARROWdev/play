@@ -242,6 +242,9 @@ class Library:
                             and all(isinstance(m, str) for m in v['members'])},
             'dismissed': [x for x in d.get('dismissed', []) if isinstance(x, str)]
                          if isinstance(d.get('dismissed'), list) else [],
+            # a show's year (show key -> year), set once for the whole show: the TV shows it with the show
+            'show_years': {k: v for k, v in _dict(d.get('show_years')).items()
+                           if isinstance(k, str) and valid('year', v) and v is not None},
             # normcased path -> when it was first found unreadable (wall clock): see ERROR_GRACE
             'unreadable_since': {k: t for k, v in _dict(d.get('unreadable_since')).items()
                                  if isinstance(k, str) and (t := _finite(v)) is not None},
@@ -733,7 +736,8 @@ class Library:
         keys = ('id', 'path', 'title', 'year', 'kind', 'show', 'season', 'episode', 'kids', 'hidden', 'collection',
                 'problems', 'copies', 'size', 'format', 'typed_title')
         rows = [[i.get(k) for k in keys] for i in self._items]
-        return hashlib.sha1(json.dumps([rows, self.data['collections'], self.data['dismissed']],
+        return hashlib.sha1(json.dumps([rows, self.data['collections'], self.data['dismissed'],
+                                        self.data['show_years']],
                                        sort_keys=True, default=str).encode()).hexdigest()
 
     def _tag_kids_once(self, fp):
@@ -852,6 +856,24 @@ class Library:
             self.data['items'][fp] = ov
         else:
             self.data['items'].pop(fp, None)
+
+    def show_year(self, show):
+        """The year set for a show (None if none)."""
+        return self.data['show_years'].get(names.show_key(show)) if show else None
+
+    def set_show_year(self, show, year):
+        """Set (or with None clear) a show's year, for every episode of it."""
+        if not valid('year', year):
+            raise ValueError(f'year cannot be {year!r}')
+        self._ensure_scanned()
+        with self.lock:
+            key = names.show_key(show)
+            if year is None:
+                self.data['show_years'].pop(key, None)
+            else:
+                self.data['show_years'][key] = year
+            self._rebuild()
+        self.save()
 
     def make_collection(self, name, members, order='year'):
         self._ensure_scanned()
@@ -1024,7 +1046,8 @@ class Library:
             for s in sorted(shows.values(), key=lambda s: names.sort_key(s['name'])):
                 seasons = [{'season': n, 'episodes': sorted(e, key=lambda x: x['episode'])}
                            for n, e in sorted(s['seasons'].items())]
-                show_list.append({'name': s['name'], 'seasons': seasons})
+                show_list.append({'name': s['name'], 'seasons': seasons,
+                                  'year': self.data['show_years'].get(names.show_key(s['name']))})
             return {'movies': movies, 'shows': show_list}
 
 
