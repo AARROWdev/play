@@ -559,8 +559,7 @@ class Library:
                     def spelled(t):
                         for rr, r in respell:
                             if t == rr or t.startswith(rr + os.sep):
-                                out = r + t[len(rr):]
-                                return out + os.sep if out.endswith(':') else out   # a drive root: 'x:\'
+                                return _folder(r + t[len(rr):])
                         return t
 
                     pending_targets = {p: [spelled(v[1]) for lk, v in links.items()
@@ -813,9 +812,12 @@ class Library:
             # it is the answer to that hint
             keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('auto_near_miss'))
             if k == 'title' and cur is not None and cur['kind'] == 'episode':
-                # an episode's title follows its numbers: typing the title they give (now) goes back to that,
-                # anything else is kept as typed (even when it reads like the file name)
-                if v == _ep_title(cur['show'], cur['season'], cur['episode'], cur.get('episode_last')):
+                # an episode's title follows its numbers: typing the title they give goes back to that (the numbers
+                # as they'll be after this call), anything else is kept as typed (even when it reads like the file
+                # name)
+                n = {f: fields.get(f, cur.get(f)) for f in ('show', 'season', 'episode')}
+                last = None if 'episode' in fields else cur.get('episode_last')
+                if v == _ep_title(n['show'], n['season'], n['episode'], last):
                     ov.pop(k, None)
                 else:
                     ov[k] = v
@@ -1047,6 +1049,12 @@ def _finite(v):
     except (OverflowError, ValueError):
         return None
     return v if math.isfinite(v) else None
+
+
+def _folder(p):
+    """A folder path as PLAY compares it: no trailing separator, but a drive root keeps its own ('x:\\')."""
+    p = p.rstrip(os.sep)
+    return p + os.sep if p.endswith(':') else p
 
 
 def _under(key, roots):

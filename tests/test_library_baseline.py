@@ -1569,14 +1569,16 @@ def _free_letter():
     """A letter nothing uses, remembered network drives included (they can be disconnected and still matter)."""
     import ctypes
     import winreg
-    used = {chr(65 + i) for i in range(26) if ctypes.windll.kernel32.GetLogicalDrives() >> i & 1}
+    mask = ctypes.windll.kernel32.GetLogicalDrives()
+    used = {chr(65 + i) for i in range(26) if mask >> i & 1}
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Network') as k:   # remembered mapped drives
             used |= {winreg.EnumKey(k, i).upper() for i in range(winreg.QueryInfoKey(k)[0])}
     except OSError:
         pass
     used |= {w[0].upper() for w in os.popen('net use 2>nul').read().split() if len(w) == 2 and w[1] == ':'}
-    for c in 'QJKRTSPOLNM':                          # rarely used letters first (network drives favour the end)
+    rare = 'QJKRTSPOLNM'                             # rarely used letters first (network drives favour the end)
+    for c in rare + ''.join(c for c in 'DEFGHIUVWXYZ' if c not in rare):
         if c not in used and not os.path.exists(c + ':' + os.sep):
             return c
     pytest.skip('no free drive letter')
@@ -1681,3 +1683,44 @@ def test_a_pending_link_to_a_drive_roots_own_folder_waits_for_its_settling_files
         assert next(i for i in lb.current() if i['title'] == 'Cars 2')['kids']
     finally:
         subprocess.run(['subst', letter + ':', '/d'], capture_output=True)
+
+
+
+def test_a_pending_link_to_a_drive_root_waits_while_that_drive_cant_be_read(tmp_path, monkeypatch):
+    kids = tmp_path / 'Kids'
+    make(str(kids), 'Up 2009.mkv', b'up' * 50)
+    movies = tmp_path / 'Movies'
+    make(str(movies), 'Cars 2006.mkv', b'cars' * 50)
+    _junction(kids / 'All', movies)                   # leads to the drive root's own folder
+    letter = _free_letter()
+    if subprocess.run(['subst', letter + ':', str(movies)], capture_output=True).returncode:
+        pytest.skip('subst unavailable')
+    try:
+        store = tmp_path / 'store'
+        store.mkdir()
+        (store / 'library.json').write_text(json.dumps({'folders': [{'path': letter + ':' + os.sep},
+                                                                    {'path': str(kids)}]}), encoding='utf-8')
+        lb = library.Library(str(store))
+        monkeypatch.setattr(library, 'SETTLE', 0)
+        lb.items(0)
+        lb.data['kids_pending'] = [os.path.normcase(str(kids / 'All'))]
+        real = os.scandir
+
+        def scandir(p):                               # the drive doesn't answer (asleep, locked)
+            if str(p).upper().startswith(letter + ':'):
+                raise PermissionError('not now')
+            return real(p)
+        monkeypatch.setattr(library.os, 'scandir', scandir)
+        lb.scan()
+        assert lb.data['kids_pending']                # kept until the drive is read
+    finally:
+        subprocess.run(['subst', letter + ':', '/d'], capture_output=True)
+
+
+def test_an_episode_title_with_new_numbers_in_the_same_call(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], episode=3, title='Ann Droid S01E03')   # the new numbers' own title: automatic
+    assert not lib.by_id(ep['id'])['typed_title']

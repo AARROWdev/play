@@ -821,6 +821,7 @@ class Window(QMainWindow):
             self.refresh()
 
     def refresh(self):
+        self._redraw.stop()                              # (this is the redraw a save was waiting for)
         # before the first scan nothing is drawn for real: leave drawn unset so the scan's result is drawn
         self.drawn = self.lib.version if self.lib._scanned else None
         items = self.lib._items
@@ -990,15 +991,17 @@ class Window(QMainWindow):
         now = ids[0] if len(ids) == 1 else None
         # typed without Enter, then another film picked: saved. Not while the box still has the focus: then the
         # selection moved without the user (a background refresh), and the text may be half typed
-        if self._year_for and self._year_for != now and self.d_year.isModified() and not self.d_year.hasFocus():
-            if self._save_year(self._year_for):
+        for box, fid, save in ((self.d_year, self._year_for, self._save_year),
+                               (self.d_title, self._title_for, self._save_title)):
+            if not (fid and fid != now and box.isModified()):
+                continue
+            if box.hasFocus():
+                # the selection moved without the user (a background refresh) while typing: the text may be half
+                # typed, so it isn't saved, and that's said
+                self._say('What you were typing wasn\'t saved: that title left this view')
+            elif save(fid):                              # typed, then another film picked
                 self._redraw.start()
-            self.d_year.setModified(False)
-        if self._title_for and self._title_for != now and self.d_title.isModified() and \
-                not self.d_title.hasFocus():
-            if self._save_title(self._title_for):
-                self._redraw.start()
-            self.d_title.setModified(False)
+            box.setModified(False)
         self._detail_for([self.lib.by_id(i) for i in ids])
 
     def _ep_edited(self, *_):
@@ -1072,19 +1075,24 @@ class Window(QMainWindow):
     YEARS = (names.FIRST_YEAR, 2100)                   # the first films to a little ahead
 
     def _year_done(self):
-        if len(self.sel) == 1 and self.sel[0]['kind'] == 'movie' and self._save_year(self.sel[0]['id']):
+        if not self.d_year.isModified():                 # (Enter or focus-out with nothing typed)
+            return
+        if len(self.sel) == 1 and self._save_year(self.sel[0]['id']):
             self._redraw.start()
         self.d_year.setModified(False)
 
-    def _gone(self, fid):
-        """The film an edit was for is no longer in the library: say so (the edit isn't saved)."""
-        self._note = ('That title is no longer in the library: the edit wasn\'t saved', time.monotonic() + 8)
+    def _say(self, text):
+        """A passing note at the front of the status bar."""
+        self._note = (text, time.monotonic() + 8)
         self._status()
 
     def _saved(self, fid):
-        """After a save: the panel's copy of the film is the saved one (the redraw comes a moment later)."""
+        """After a save: the panel's copy of the film is the saved one, heading too (the redraw comes a moment
+        later)."""
         new = self.lib.by_id(fid)
         self.sel = [new if (i['id'] == fid and new is not None) else i for i in self.sel]
+        if new is not None and len(self.sel) == 1:
+            self.d_heading.setText(new['title'])
 
     def _save_year(self, fid):
         """The Year box's text for the film fid: a year saves, empty clears it, anything else is put back.
@@ -1092,9 +1100,10 @@ class Window(QMainWindow):
         text = self.d_year.text().strip()
         film = self.lib.by_id(fid)
         if film is None:
-            self._gone(fid)
+            self._say('That title is no longer in the library: the edit wasn\'t saved')
             return False
         if film['kind'] != 'movie':
+            self._say('That\'s an episode now (years are for films): the year wasn\'t saved')
             return False
         # ASCII digits only: '²' or '١' pass isdigit() and int() refuses or misreads them
         year = int(text) if text.isascii() and text.isdigit() else None
@@ -1113,7 +1122,7 @@ class Window(QMainWindow):
         t = self.d_title.text().strip()
         old = self.lib.by_id(fid)
         if old is None:
-            self._gone(fid)
+            self._say('That title is no longer in the library: the edit wasn\'t saved')
             return False
         if t and t != old['title']:
             self.lib.set_item(fid, title=t)
@@ -1122,6 +1131,8 @@ class Window(QMainWindow):
         return False
 
     def _title_done(self):
+        if not self.d_title.isModified():                # (Enter or focus-out with nothing typed)
+            return
         changed = len(self.sel) == 1 and self._save_title(self.sel[0]['id'])
         self.d_title.setModified(False)          # Enter, changed or not: the box follows the title again
         if changed:

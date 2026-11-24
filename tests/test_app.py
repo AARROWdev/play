@@ -98,6 +98,7 @@ def test_kids_and_hide_buttons_apply_to_selection(win):
 def test_title_edit(win):
     pick(win, 'Conor')
     win.d_title.setText('Conor the Barbarian')
+    win.d_title.setModified(True)
     win.d_title.editingFinished.emit()
     assert 'Conor the Barbarian' in titles(win)
 
@@ -1247,14 +1248,17 @@ def test_the_year_box_sets_a_films_year(win):
     win._detail_for([film])
     assert win.d_year.isEnabled() and win.d_year.text() == ''
     win.d_year.setText('1995')
+    win.d_year.setModified(True)
     win._year_done()
     assert win.lib.by_id(film['id'])['year'] == 1995
     win._detail_for([win.lib.by_id(film['id'])])
     win.d_year.setText('')                          # cleared: no year again
+    win.d_year.setModified(True)
     win._year_done()
     assert not win.lib.by_id(film['id']).get('year')
     win._detail_for([win.lib.by_id(film['id'])])
     win.d_year.setText('12')                        # not a year: left as it was
+    win.d_year.setModified(True)
     win._year_done()
     assert not win.lib.by_id(film['id']).get('year')
     episode = next(i for i in win.lib._items if i['kind'] == 'episode')
@@ -1496,6 +1500,7 @@ def test_a_title_typed_then_another_film_picked_is_saved(win):
 def test_a_year_never_lands_on_an_episode(win):
     ep = next(i for i in win.lib._items if i['kind'] == 'episode')
     win.d_year.setText('1999')
+    win.d_year.setModified(True)
     win._save_year(ep['id'])
     assert not win.lib.by_id(ep['id']).get('year')
 
@@ -1572,6 +1577,7 @@ def test_saves_in_a_row_redraw_once(win, monkeypatch):
     for f in films:
         pick(win, f['title'])
         win.d_title.setText(f['title'] + ' X')
+        win.d_title.setModified(True)
         win._title_done()
     QApplication.processEvents()
     QApplication.processEvents()
@@ -1583,11 +1589,101 @@ def test_an_edit_for_a_film_thats_gone_says_so(win):
     fid = win.sel[0]['id']
     win.lib._by_id.pop(fid)                              # gone meanwhile
     win.d_title.setText('New Name')
+    win.d_title.setModified(True)
     assert win._save_title(fid) is False and 'no longer in the library' in win._note[0]
 
 
 def test_after_a_save_the_panel_holds_the_saved_film(win):
     pick(win, 'Conor')
     win.d_title.setText('Conor Renamed')
+    win.d_title.setModified(True)
     win._title_done()
     assert win.sel[0]['title'] == 'Conor Renamed'        # before the redraw
+
+
+
+# ------------------------------------------------------------------ 45a7558 review
+def test_a_refresh_dropping_typing_says_so(win):
+    from PySide6.QtTest import QTest
+    win.resize(1000, 600)
+    win.show()
+    win.activateWindow()
+    if not QTest.qWaitForWindowActive(win):
+        pytest.skip('no active window on this platform')
+    pick(win, 'Conor')
+    win.d_title.setFocus()
+    QTest.keyClicks(win.d_title, 'x')
+    win.view.clearSelection()
+    win._sel_changed()
+    assert win._note and "wasn't saved" in win._note[0]
+    win.hide()
+
+
+def test_enter_with_nothing_typed_says_nothing(win):
+    pick(win, 'Conor')
+    win.lib._by_id.pop(win.sel[0]['id'])           # gone meanwhile
+    win._note = None
+    win._title_done()
+    win._year_done()
+    assert win._note is None
+
+
+def test_a_sync_refresh_cancels_the_pending_redraw(win):
+    win._redraw.start()
+    win.refresh()
+    assert not win._redraw.isActive()
+
+
+def test_a_year_for_a_film_that_became_an_episode_says_so(win):
+    ep = next(i for i in win.lib._items if i['kind'] == 'episode')
+    win.d_year.setText('1999')
+    win.d_year.setModified(True)
+    assert win._save_year(ep['id']) is False and 'episode' in win._note[0]
+
+
+def test_the_heading_follows_a_saved_title(win):
+    pick(win, 'Conor')
+    win.d_title.setText('Conor Renamed')
+    win.d_title.setModified(True)
+    win._title_done()
+    assert win.d_heading.text() == 'Conor Renamed'
+
+
+def _find(w, title, parent=None):
+    from PySide6.QtCore import QModelIndex
+    parent = parent or QModelIndex()
+    for r in range(w.model.rowCount(parent)):
+        idx = w.model.index(r, 0, parent)
+        if idx.data(pa.KIND) == 'item' and w.lib.by_id(idx.data(pa.ID))['title'] == title:
+            return idx
+        hit = _find(w, title, idx)
+        if hit is not None:
+            return hit
+    return None
+
+
+def test_a_year_typed_in_collections_then_a_click_selects_the_film_clicked(win, monkeypatch):
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtTest import QTest
+    monkeypatch.setattr(pa.CollectionDialog, 'exec', lambda self: QDialog.Accepted)
+    win._make_suggested()                            # Jungle Park (1993), III (2001), World (2015)
+    win.resize(1000, 600)
+    win.show()
+    win.activateWindow()
+    if not QTest.qWaitForWindowActive(win):
+        pytest.skip('no active window on this platform')
+    set_filter(win, 'collections')
+    win.view.expandAll()
+    pick(win, 'Jungle Park')
+    jp = win.sel[0]['id']
+    win.d_year.setFocus()
+    win.d_year.selectAll()
+    QTest.keyClicks(win.d_year, '2020')              # moves it last in release order
+    target = _find(win, 'Jungle World')
+    want = target.data(pa.ID)
+    QTest.mouseClick(win.view.viewport(), _Qt.LeftButton, pos=win.view.visualRect(target).center())
+    for _ in range(3):
+        QApplication.processEvents()
+    win.view.expandAll()
+    assert win.selected_ids() == [want] and win.lib.by_id(jp)['year'] == 2020
+    win.hide()
