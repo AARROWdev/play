@@ -1042,7 +1042,7 @@ class Window(QMainWindow):
         self.d_title.setEnabled(bool(one))
         self.d_year.setEnabled(bool(one) and one['kind'] == 'movie')
         if not (one and self._year_for == one['id'] and self.d_year.isModified()):   # (not mid-typing)
-            self.d_year.setText(str(one.get('year') or '') if one and one['kind'] == 'movie' else '')
+            self.d_year.setText(str(one.get('year') or '') if one else '')   # (an episode's year is None)
         self._year_for = one['id'] if one else None
         same = one and self._title_for == one['id']
         if not (same and self.d_title.isModified()):     # don't wipe a title you're in the middle of typing

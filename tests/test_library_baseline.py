@@ -1811,5 +1811,41 @@ def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
     lib.set_item(m['id'], kind='episode', show='Conor', season=1, episode=1)
     it = lib.by_id(m['id'])
     assert it['kind'] == 'episode' and it['year'] is None     # no film year on an episode (Year column, TV)
+    lib.set_items([m['id']], year=1990)                        # a year sent for an episode (not from the UI)
+    assert lib.by_id(m['id'])['year'] is None and 'year' not in lib.data['items'].get(m['id'], {})
+    view = json.dumps(lib.tv_view(kids=False))
+    assert '1982' not in view                                  # the TV payload has no film year for it
     lib.set_item(m['id'], kind='movie')
     assert lib.by_id(m['id'])['year'] == 1982                 # a film again: its year is back
+
+
+
+def test_a_bad_hand_edited_title_or_kind_counts_as_no_override(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'title': '', 'kind': 'film'}   # both invalid (a hand edit)
+    lib._rebuild()
+    it = lib.by_id(ep['id'])
+    assert it['title'] == 'Ann Droid S01E02' and not it['typed_title'] and it['kind'] == 'episode'
+
+
+def test_a_bad_season_with_a_valid_episode_override(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'season': 'two', 'episode': 3}  # the season is ignored, the episode isn't
+    lib._rebuild()
+    shown = lib.by_id(ep['id'])['title']
+    assert shown == 'Ann Droid S01E03'
+    lib.set_item(ep['id'], title=shown)
+    assert not lib.by_id(ep['id'])['typed_title']
+
+
+def test_a_hand_typed_forward_slash_folder_reads_the_same(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'sub'), 'Heat 1995.mkv', b'h' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm').replace(os.sep, '/') + '/'}])
+    lib.scan()
+    assert [i['title'] for i in lib.current()] == ['Heat']
