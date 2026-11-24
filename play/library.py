@@ -1061,6 +1061,8 @@ def _resolve(auto, auto_last, ov):
         s['kind'] = 'movie'                  # an override that turned it into an episode without the details
     if s['kind'] == 'movie':
         s['show'] = s['season'] = s['episode'] = s['episode_last'] = None
+    else:
+        s['year'] = None                     # an episode has no film year (one made from a film drops it)
     return s
 
 

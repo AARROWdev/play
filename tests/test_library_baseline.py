@@ -1799,3 +1799,17 @@ def test_kind_movie_answering_a_near_miss_is_kept_with_a_title_in_the_same_edit(
         pytest.skip('this name is not flagged as a near miss')
     lib.set_item(m['id'], kind='movie', title=m['title'] + ' X')
     assert lib.data['items'][m['id']].get('kind') == 'movie'   # the answer to the hint is kept
+
+
+
+def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Conor 1982.mkv', b'c' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    assert m['year'] == 1982
+    lib.set_item(m['id'], kind='episode', show='Conor', season=1, episode=1)
+    it = lib.by_id(m['id'])
+    assert it['kind'] == 'episode' and it['year'] is None     # no film year on an episode (Year column, TV)
+    lib.set_item(m['id'], kind='movie')
+    assert lib.by_id(m['id'])['year'] == 1982                 # a film again: its year is back
