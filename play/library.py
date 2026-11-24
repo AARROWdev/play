@@ -805,6 +805,8 @@ class Library:
             else:
                 ov[k] = v
         if cur is not None:
+            before, before_auto, before_used = _resolve(cur['auto'], cur.get('auto_last'),
+                                                        self.data['items'].get(fp, {}))
             s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
             # an episode has no film year: a year sent for one isn't kept (the film year it had stays)
             if 'year' in fields and s['kind'] != 'episode':
@@ -813,15 +815,18 @@ class Library:
                 else:
                     ov['year'] = fields['year']
             # the title this edit leaves automatic (an episode: from its numbers, as the edit leaves them). Typing
-            # exactly that goes back to automatic; anything else is kept as typed. An edit that renames or renumbers
-            # also drops a stored title it makes automatic, so a later renumber doesn't bring it back (a Kids or
-            # Hide toggle leaves the stored title alone)
+            # exactly that goes back to automatic; anything else is kept as typed.
+            # A stored title is dropped by an edit that really changes the show or the numbers when it isn't a
+            # typed title any more: it already read as automatic before the edit (left over), or the new numbers
+            # give exactly it (it was typed to match them), so a later renumber can't bring it back. A kind change
+            # alone keeps a typed title (it's yours), and so does a Kids or Hide toggle.
+            renumbered = any(before.get(k) != s.get(k) for k in ('show', 'season', 'episode'))
             if 'title' in fields:
-                if fields['title'] == auto_title:
+                if fields['title'] == (auto_title or '').strip():
                     ov.pop('title', None)
                 else:
                     ov['title'] = fields['title']
-            elif set(fields) & {'kind', 'show', 'season', 'episode'} and ov.get('title') == auto_title:
+            elif renumbered and 'title' in ov and ('title' not in before_used or ov['title'] == auto_title):
                 ov.pop('title', None)
         if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
             self.data['items'][fp] = ov

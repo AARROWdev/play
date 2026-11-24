@@ -1942,3 +1942,47 @@ def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
     assert s['kind'] == 'movie' and not used & {'show', 'season', 'episode'}
     s, _t, used = _resolve(auto, None, {'kind': 'episode', 'show': 'X', 'season': 1, 'episode': 1, 'year': 1999})
     assert s['kind'] == 'episode' and 'year' not in used
+
+
+
+def test_a_typed_title_survives_a_kind_round_trip(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], title='Foo')
+    lib.set_item(ep['id'], kind='movie')
+    lib.set_item(ep['id'], kind='episode')
+    assert lib.by_id(ep['id'])['title'] == 'Foo' and lib.by_id(ep['id'])['typed_title']
+
+
+def test_a_left_over_automatic_title_is_dropped_by_the_next_renumber(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E03.mkv', b'three' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'title': 'Ann Droid S01E03'}   # stored, but it reads as automatic already
+    lib._rebuild()
+    lib.set_item(ep['id'], episode=4)
+    assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E04'
+
+
+def test_sending_the_same_numbers_keeps_a_typed_title(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], title='The Pool')
+    lib.set_item(ep['id'], show='Ann Droid', season=1, episode=2)   # nothing changes
+    assert lib.by_id(ep['id'])['title'] == 'The Pool'
+
+
+def test_a_padded_untitled_name_isnt_confirmed_by_typing_it(lib, tmp_path):
+    make(str(tmp_path / 'm'), ' 1080p .mkv', b'x' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    if not m['untitled']:
+        pytest.skip('this name reads as a title here')
+    lib.set_item(m['id'], title='1080p')
+    assert lib.by_id(m['id'])['untitled']
