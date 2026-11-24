@@ -1922,7 +1922,7 @@ def test_the_near_miss_hint_on_a_movie_follows_valid_overrides_only(lib, tmp_pat
     assert not lib.by_id(m['id'])['near_miss']
 
 
-def test_a_kids_toggle_doesnt_drop_a_typed_title(lib, tmp_path):
+def test_a_kids_toggle_keeps_an_automatic_title_automatic(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
@@ -1931,7 +1931,8 @@ def test_a_kids_toggle_doesnt_drop_a_typed_title(lib, tmp_path):
     lib._rebuild()
     assert not lib.by_id(ep['id'])['typed_title']                              # drawn as automatic (no repeat)
     lib.set_item(ep['id'], kids=True)
-    assert lib.data['items'][ep['id']].get('title') == 'Ann Droid S01E02'      # a Kids toggle leaves it stored
+    it = lib.by_id(ep['id'])
+    assert it['kids'] and it['title'] == 'Ann Droid S01E02' and not it['typed_title']   # (a left-over is tidied)
 
 
 def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
@@ -1946,14 +1947,16 @@ def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
 
 
 def test_a_typed_title_survives_a_kind_round_trip(lib, tmp_path):
-    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
-    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
-    lib.set_item(ep['id'], title='Foo')
-    lib.set_item(ep['id'], kind='movie')
-    lib.set_item(ep['id'], kind='episode')
-    assert lib.by_id(ep['id'])['title'] == 'Foo' and lib.by_id(ep['id'])['typed_title']
+    m = lib.current()[0]
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
+    lib.set_item(m['id'], title='Home Movie')                  # typed on the episode: the film's own name
+    lib.set_item(m['id'], kind='movie')                        # a kind change alone keeps it ...
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
+    it = lib.by_id(m['id'])
+    assert it['title'] == 'Home Movie' and it['typed_title']   # ... back as an episode, still yours
 
 
 def test_a_left_over_automatic_title_is_dropped_by_the_next_renumber(lib, tmp_path):
@@ -1972,9 +1975,9 @@ def test_sending_the_same_numbers_keeps_a_typed_title(lib, tmp_path):
     lib.set_folders([{'path': str(tmp_path / 'm')}])
     lib.scan()
     ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
-    lib.set_item(ep['id'], title='The Pool')
+    lib.set_item(ep['id'], title='Ann Droid S01E03')           # typed, equal to a number it doesn't have yet
     lib.set_item(ep['id'], show='Ann Droid', season=1, episode=2)   # nothing changes
-    assert lib.by_id(ep['id'])['title'] == 'The Pool'
+    assert lib.by_id(ep['id'])['typed_title'] and lib.by_id(ep['id'])['title'] == 'Ann Droid S01E03'
 
 
 def test_a_padded_untitled_name_isnt_confirmed_by_typing_it(lib, tmp_path):
@@ -1986,3 +1989,25 @@ def test_a_padded_untitled_name_isnt_confirmed_by_typing_it(lib, tmp_path):
         pytest.skip('this name reads as a title here')
     lib.set_item(m['id'], title='1080p')
     assert lib.by_id(m['id'])['untitled']
+
+
+
+def test_a_left_over_title_is_cleaned_by_any_edit(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E03.mkv', b'three' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'title': 'Ann Droid S01E03'}   # reads as automatic already
+    lib._rebuild()
+    lib.set_item(ep['id'], kids=True)
+    assert 'title' not in lib.data['items'][ep['id']]
+
+
+def test_an_untitled_padded_name_is_stored_stripped(lib, tmp_path):
+    make(str(tmp_path / 'm'), ' 1080p .mkv', b'x' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    if not m['untitled']:
+        pytest.skip('this name reads as a title here')
+    assert m['title'] == '1080p'
