@@ -1730,7 +1730,7 @@ def test_an_episode_title_with_new_numbers_in_the_same_call(lib, tmp_path):
 def test_folder_keeps_drive_roots_whole_and_strips_the_rest():
     assert library._folder('c:' + os.sep + 'media' + os.sep) == 'c:' + os.sep + 'media'
     assert library._folder('x:') == 'x:' + os.sep and library._folder('x:' + os.sep) == 'x:' + os.sep
-    assert library._folder(os.sep) == os.sep
+    assert library._folder(os.sep) == os.sep and library._folder('') == ''
 
 
 def test_an_episode_back_to_its_file_number_gets_its_second_number_back(lib, tmp_path):
@@ -1751,3 +1751,27 @@ def test_an_episode_title_with_padded_show_and_a_kind_change(lib, tmp_path):
     lib.set_item(m['id'], kind='episode', show=' Ann Droid ', season=1, episode=4, title='Ann Droid S01E04')
     it = lib.by_id(m['id'])
     assert it['kind'] == 'episode' and not it['typed_title']   # the numbers' own title: automatic
+
+
+
+def test_a_typed_automatic_title_after_a_hand_edited_episode_override(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E01-E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'episode': 1}      # an override equal to automatic (a hand edit)
+    lib._rebuild()
+    shown = lib.by_id(ep['id'])['title']              # what PLAY shows for it now
+    lib.set_item(ep['id'], title=shown)
+    assert not lib.by_id(ep['id'])['typed_title']     # the title shown, typed back, stays automatic
+
+
+def test_a_movie_back_to_episode_with_its_own_title(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E01-E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.set_item(ep['id'], kind='movie')
+    lib.set_item(ep['id'], kind='episode', title='Ann Droid S01E01-E02')
+    it = lib.by_id(ep['id'])
+    assert it['kind'] == 'episode' and not it['typed_title']

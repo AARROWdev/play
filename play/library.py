@@ -744,13 +744,13 @@ class Library:
             it.update(kind='movie', title=t, year=y, show=None, season=None, episode=None,
                       near_miss=names.looks_like_episode(stem, in_season))
         it['auto'] = {k: it.get(k) for k in OVERRIDABLE}
+        it['auto_last'] = it['episode_last']        # the file name's own second episode ('E01-E02'), if any
         it['auto_near_miss'] = it['near_miss']
         ov = self.data['items'].get(fp, {})
         for k in OVERRIDABLE:
             if k in ov and valid(k, ov[k]):       # a bad hand-edited value is ignored, not fatal
                 it[k] = ov[k]
-        if 'episode' in ov:                       # renumbered: the file name's second episode no longer applies
-            it['episode_last'] = None
+        it['episode_last'] = _ep_last(it['auto_last'], ov)
         if it['kind'] == 'episode' and not (it.get('show') and isinstance(it.get('season'), int)
                                              and isinstance(it.get('episode'), int)):
             it['kind'] = 'movie'                 # an override that turned it into an episode without the details
@@ -811,7 +811,8 @@ class Library:
             # kind=movie is kept even when it is the automatic value, for a name flagged as "looks like an episode":
             # it is the answer to that hint
             keep = k == 'kind' and v == 'movie' and cur is not None and bool(cur.get('auto_near_miss'))
-            after = self._after(cur, fields) if k == 'title' and cur is not None else None
+            after = self._after(cur, self.data['items'].get(fp, {}), fields) \
+                if k == 'title' and cur is not None else None
             if after is not None:
                 # an episode's title follows its numbers: typing the title they give goes back to that (the episode
                 # as it will be after this edit), anything else is kept as typed (even when it reads like the file
@@ -831,23 +832,24 @@ class Library:
             self.data['items'].pop(fp, None)
 
     @staticmethod
-    def _after(cur, fields):
+    def _after(cur, stored, fields):
         """(show, season, episode, last) of the title as it will be after an edit with these fields, if it will be
-        an episode; None if not. Values are read as the edit stores them (strings stripped)."""
-        def val(f):
-            v = fields.get(f, cur.get(f))
-            return v.strip() if isinstance(v, str) else v
-        if val('kind') != 'episode':
+        an episode; None if not. Built the way _item builds a title: the automatic values, the overrides kept after
+        this edit (a value equal to the automatic one isn't one), and the same second-number rule."""
+        ov = {k: v for k, v in stored.items() if k in OVERRIDABLE and k != 'title'}
+        for k, v in fields.items():
+            if k == 'title' or k not in OVERRIDABLE:
+                continue
+            v = v.strip() if isinstance(v, str) else v
+            if cur['auto'].get(k) == v:
+                ov.pop(k, None)
+            else:
+                ov[k] = v
+        state = {**cur['auto'], **ov}
+        show, season, episode = state.get('show'), state.get('season'), state.get('episode')
+        if state.get('kind') != 'episode' or not (show and isinstance(season, int) and isinstance(episode, int)):
             return None
-        show, season, episode = val('show'), val('season'), val('episode')
-        if not (show and isinstance(season, int) and isinstance(episode, int)):
-            return None
-        last = None                                 # a renumbered episode has no second number ...
-        if episode == cur['auto'].get('episode'):   # ... unless it's back to the file name's (its 'E01-E02')
-            info = names.episode_info(cur['path'], cur['folder'])
-            if info and info['last'] > info['episode']:
-                last = info['last']
-        return show, season, episode, last
+        return show, season, episode, _ep_last(cur.get('auto_last'), ov)
 
     def make_collection(self, name, members, order='year'):
         self._ensure_scanned()
@@ -1069,10 +1071,17 @@ def _finite(v):
     return v if math.isfinite(v) else None
 
 
+def _ep_last(auto_last, ov):
+    """An episode's second number: the file name's own, unless the episode number was changed by hand."""
+    return None if 'episode' in ov else auto_last
+
+
 def _folder(p):
     """A folder path as PLAY compares it: no trailing separator, but a drive root keeps its own ('x:\\')."""
-    p = p.rstrip(os.sep)
-    return p + os.sep if p.endswith(':') or not p else p   # (and '/' stays '/')
+    if not p:
+        return p
+    q = p.rstrip(os.sep)
+    return q + os.sep if q.endswith(':') or not q else q   # (a path of separators only stays the root)
 
 
 def _under(key, roots):

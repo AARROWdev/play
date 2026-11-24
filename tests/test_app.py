@@ -1552,26 +1552,22 @@ def test_nothing_selected_then_the_same_film_shows_its_title(win):
 
 
 # ------------------------------------------------------------------ c104ade review
+def _search_away(win):
+    """A real redraw that filters the selected film out of view (the search box)."""
+    win.search.setText('Clip')
+    win.search_timer.stop()
+    win.refresh()
+
+
 def test_a_refresh_while_typing_doesnt_save_half_a_title(win):
     from PySide6.QtTest import QTest
-    win.resize(1000, 600)
-    win.show()
-    win.activateWindow()
-    if not QTest.qWaitForWindowActive(win):
-        pytest.skip('no active window on this platform')
     pick(win, 'Conor')
     conor = win.sel[0]['id']
-    win.d_title.setFocus()
     win.d_title.selectAll()
     QTest.keyClicks(win.d_title, 'Aardv')                # still typing ...
-    win._refreshing = True                              # ... and a background refresh drops the film from view
-    try:
-        win.view.clearSelection()
-        win._sel_changed()
-    finally:
-        win._refreshing = False
+    _search_away(win)                                   # ... and a redraw drops the film from view
     assert win.lib.by_id(conor)['title'] == 'Conor'     # half a word isn't saved
-    win.hide()
+    assert 'title' not in win.lib.data['items'].get(conor, {})
 
 
 def test_saves_in_a_row_redraw_once(win, monkeypatch):
@@ -1611,15 +1607,10 @@ def test_a_refresh_dropping_typing_says_so(win):
     from PySide6.QtTest import QTest
     pick(win, 'Conor')
     fid = win.sel[0]['id']
-    QTest.keyClicks(win.d_title, 'x')                # typed (no focus needed: the redraw flag decides)
-    win._refreshing = True                           # a redraw moves the selection, not the user
-    try:
-        win.view.clearSelection()
-        win._sel_changed()
-    finally:
-        win._refreshing = False
+    QTest.keyClicks(win.d_title, 'x')
+    _search_away(win)
     assert win._note and "wasn't saved" in win._note[0]
-    assert win.lib.by_id(fid)['title'] == 'Conor'    # nothing half typed was saved
+    assert 'title' not in win.lib.data['items'].get(fid, {})   # nothing half typed was saved
 
 
 def test_enter_with_nothing_typed_says_nothing(win):
@@ -1694,29 +1685,36 @@ def test_a_year_typed_in_collections_then_a_click_selects_the_film_clicked(win, 
 
 
 # ------------------------------------------------------------------ 42bd0aa review
-def test_a_user_click_still_saves_with_the_box_focused(win):
+def test_a_selection_change_saves_even_with_the_box_focused(win):
     from PySide6.QtTest import QTest
+    win.resize(1000, 600)
+    win.show()
+    win.activateWindow()
+    if not QTest.qWaitForWindowActive(win):
+        pytest.skip('no active window on this platform')
     pick(win, 'Conor')
     fid = win.sel[0]['id']
+    win.d_title.setFocus()
+    QApplication.processEvents()
+    assert win.d_title.hasFocus()
     win.d_title.selectAll()
     QTest.keyClicks(win.d_title, 'Conor Two')
-    pick(win, 'Clip')                                # the user picked another film (not a redraw)
-    assert win.lib.by_id(fid)['title'] == 'Conor Two'
+    pick(win, 'Clip')                                # the selection moves (not a redraw), focus still in the box
+    assert win.lib.by_id(fid)['title'] == 'Conor Two'    # only a redraw holds a typed edit back, not the focus
+    win.hide()
 
 
 def test_a_deleted_film_while_typing_says_its_gone(win):
     from PySide6.QtTest import QTest
     pick(win, 'Conor')
     fid = win.sel[0]['id']
+    path = win.sel[0]['path']
     QTest.keyClicks(win.d_title, 'x')
-    win.lib._by_id.pop(fid)
-    win._refreshing = True
-    try:
-        win.view.clearSelection()
-        win._sel_changed()
-    finally:
-        win._refreshing = False
-    assert 'no longer in the library' in win._note[0]
+    os.remove(path)                                  # deleted on disk while typing
+    win.lib.scan()
+    win.refresh()                                    # the real redraw after the scan
+    assert win.lib.by_id(fid) is None and 'no longer in the library' in win._note[0]
+    assert 'title' not in win.lib.data['items'].get(fid, {})
 
 
 def test_the_heading_is_left_alone_for_another_films_save(win):
