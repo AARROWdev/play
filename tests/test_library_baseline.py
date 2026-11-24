@@ -377,7 +377,6 @@ def test_three_digit_episode_titles_are_migrated(tmp_path):
     assert 'title' not in library.Library(str(tmp_path)).data['items']['abc']
 
 
-
 # ------------------------------------------------------------------ 7015d01 review
 def test_second_movie_click_keeps_the_answer(tmp_path):
     make(str(tmp_path / 'm' / 'Show' / 'Season 1'), 'Pilot.mkv')
@@ -710,7 +709,6 @@ def test_an_unreached_media_folder_keeps_its_error_clock(tmp_path, monkeypatch):
     assert lb.data['unreadable_since'] == first
 
 
-
 # ------------------------------------------------------------------ 6ae30f6 review
 def _offline_link_setup(tmp_path):
     films = tmp_path / 'OtherDrive'
@@ -774,7 +772,6 @@ def test_an_offline_media_folder_link_is_named_once(tmp_path):
     lb.scan()
     assert len([u for u in lb.unreachable if u.lower().endswith('films')]) == 1
     assert not any(k.endswith('films') for k in lb.data['unreadable_since'])
-
 
 
 # ------------------------------------------------------------------ 894cf49 review
@@ -857,7 +854,6 @@ def test_a_media_folder_with_a_trailing_slash_in_the_settings(tmp_path):
     assert lb.folders[0]['path'] == str(root)
 
 
-
 # ------------------------------------------------------------------ 6fb1782 review
 def test_an_unreadable_subfolder_added_as_a_media_folder_keeps_its_titles(tmp_path, monkeypatch):
     root = tmp_path / 'Media'
@@ -882,7 +878,6 @@ def test_a_kids_link_that_is_also_its_own_folder_makes_its_films_kids(tmp_path):
     lb.set_folders([{'path': str(kids), 'kids': True}, {'path': str(kids / 'Cartoons')}])
     (ts,) = lb.items(0)
     assert ts['kids']
-
 
 
 # ------------------------------------------------------------------ 810cdfe review
@@ -933,7 +928,6 @@ def test_case_e_a_title_stays_with_the_deepest_folder(tmp_path):
     assert [os.path.basename(e[1]) for e in lb._raw[films]] == ['Alien 1979.mkv']
 
 
-
 # ------------------------------------------------------------------ 8dd6488 review
 def test_removing_a_folder_a_link_leads_to_while_it_is_offline(tmp_path):
     other = tmp_path / 'Other'
@@ -969,7 +963,6 @@ def test_a_deleted_media_folder_leaves_no_ghosts(tmp_path):
 def titles_now(lb):
     lb.scan()
     return sorted(i['title'] for i in lb.current())
-
 
 
 # ------------------------------------------------------------------ 2216030 review
@@ -1048,7 +1041,6 @@ def test_a_folder_behind_an_offline_link_is_not_deleted(tmp_path):
     assert not library._gone(str(media / 'Films' / 'Sub'), {os.path.normcase(str(media))})
 
 
-
 # ------------------------------------------------------------------ c4b35e1 review
 def test_a_deleted_kids_folder_stops_making_films_kids(tmp_path):
     other = tmp_path / 'Other'
@@ -1123,7 +1115,6 @@ def test_the_kept_titles_pool_is_reused_until_something_changes(tmp_path):
     assert lb._pool_cache[1] is not first                  # a new title: built again
 
 
-
 # ------------------------------------------------------------------ 0ac5404 review
 def test_links_under_a_renamed_folder_are_forgotten(tmp_path):
     other = tmp_path / 'Other'
@@ -1189,7 +1180,6 @@ def test_a_renamed_folder_with_a_sleeping_link_keeps_its_titles(tmp_path):
     assert titles_now(lb) == ['Alien', 'Heat']
 
 
-
 # ------------------------------------------------------------------ 41e603e review
 def test_an_offline_link_keeps_the_target_it_had_online(tmp_path, monkeypatch):
     # A link to a mapped drive, as Windows does it: the link itself says Z:\Movies, online it resolves to the
@@ -1235,7 +1225,6 @@ def test_switching_a_folder_from_its_link_to_its_target_while_unplugged(tmp_path
     assert titles_now(lb) == ['Alien']
 
 
-
 # ------------------------------------------------------------------ 8f8e372 review
 def test_a_rename_doesnt_make_a_false_copy(tmp_path):
     media = tmp_path / 'Media'
@@ -1270,7 +1259,6 @@ def test_a_repointed_offline_junction_follows_its_new_target(tmp_path):
     assert titles_now(lb) == ['Heat']                        # Alien isn't kept under Films any more
 
 
-
 # ------------------------------------------------------------------ f6715c4 review
 def test_an_unplugged_second_copy_keeps_the_title(tmp_path):
     media, usb = tmp_path / 'Media', tmp_path / 'USB'
@@ -1299,7 +1287,6 @@ def test_a_link_to_a_moved_folder_keeps_its_titles(tmp_path):
     assert titles_now(lb) == ['Heat', 'Up']
     os.rename(str(media / 'Kids'), str(tmp_path / 'KidsMoved'))   # moved out: Cartoons now leads nowhere
     assert titles_now(lb) == ['Heat', 'Up']
-
 
 
 # ------------------------------------------------------------------ 42b0a45 review
@@ -1400,7 +1387,6 @@ def test_a_film_on_two_unplugged_folders_stays_with_the_first(tmp_path):
     assert alien['folder'] == str(usb1)
 
 
-
 # ------------------------------------------------------------------ 1a25fcb review
 def test_an_older_kids_folder_tags_once_then_is_ordinary(tmp_path):
     kids = tmp_path / 'Kids'
@@ -1416,7 +1402,6 @@ def test_an_older_kids_folder_tags_once_then_is_ordinary(tmp_path):
     lb.scan()
     assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']   # a film added later isn't
     assert library.Library(str(store)).folders[0]['kids'] is False         # saved
-
 
 
 def test_an_older_kids_folder_waits_for_a_full_read(tmp_path, monkeypatch):
@@ -1454,7 +1439,6 @@ def test_settings_saved_before_the_first_scan_keep_an_older_kids_folder(tmp_path
     make(str(kids), 'Heat 1995.mkv', b'heat' * 50)
     lb.scan()
     assert not next(i for i in lb.current() if i['title'] == 'Heat')['kids']
-
 
 
 # ------------------------------------------------------------------ 96e83f3 review
@@ -1558,7 +1542,6 @@ def test_a_link_under_a_pending_folder_tags_where_it_leads(tmp_path, monkeypatch
     assert next(i for i in lb.current() if i['title'] == 'Up')['kids']
 
 
-
 def test_years_from_1870_read_as_years():
     assert names.movie('The Kiss (1896)') == ('The Kiss', 1896)
     assert names.movie('A Trip to the Moon 1902') == ('A Trip to the Moon', 1902)
@@ -1613,7 +1596,6 @@ def test_a_pending_link_into_a_drive_root_media_folder_waits_for_settling(tmp_pa
         assert next(i for i in lb.current() if i['title'] == 'Cars 2')['kids']
     finally:
         subprocess.run(['subst', letter + ':', '/d'], capture_output=True)
-
 
 
 def test_typing_an_episodes_own_number_title_follows_the_numbers_again(lib, tmp_path):
@@ -1685,7 +1667,6 @@ def test_a_pending_link_to_a_drive_roots_own_folder_waits_for_its_settling_files
         subprocess.run(['subst', letter + ':', '/d'], capture_output=True)
 
 
-
 def test_a_pending_link_to_a_drive_root_waits_while_that_drive_cant_be_read(tmp_path, monkeypatch):
     kids = tmp_path / 'Kids'
     make(str(kids), 'Up 2009.mkv', b'up' * 50)
@@ -1726,7 +1707,6 @@ def test_an_episode_title_with_new_numbers_in_the_same_call(lib, tmp_path):
     assert not lib.by_id(ep['id'])['typed_title']
 
 
-
 def test_folder_keeps_drive_roots_whole_and_strips_the_rest():
     assert library._folder('c:' + os.sep + 'media' + os.sep) == 'c:' + os.sep + 'media'
     assert library._folder('x:') == 'x:' + os.sep and library._folder('x:' + os.sep) == 'x:' + os.sep
@@ -1753,7 +1733,6 @@ def test_an_episode_title_with_padded_show_and_a_kind_change(lib, tmp_path):
     assert it['kind'] == 'episode' and not it['typed_title']   # the numbers' own title: automatic
 
 
-
 def test_a_typed_automatic_title_after_a_hand_edited_episode_override(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E01-E02.mkv', b'two' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1778,7 +1757,6 @@ def test_a_movie_back_to_episode_with_its_own_title(lib, tmp_path):
     assert it['kind'] == 'episode' and not it['typed_title']
 
 
-
 def test_a_bad_hand_edited_season_is_ignored_when_judging_a_typed_title(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1801,7 +1779,6 @@ def test_kind_movie_answering_a_near_miss_is_kept_with_a_title_in_the_same_edit(
     assert lib.data['items'][m['id']].get('kind') == 'movie'   # the answer to the hint is kept
 
 
-
 def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
     make(str(tmp_path / 'm'), 'Conor 1982.mkv', b'c' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1818,7 +1795,6 @@ def test_a_film_made_an_episode_drops_its_year(lib, tmp_path):
     assert entry['year'] is None                                  # the TV payload carries no film year for it
     lib.set_item(m['id'], kind='movie')
     assert lib.by_id(m['id'])['year'] == 1982                 # a film again: its year is back
-
 
 
 def test_a_bad_hand_edited_title_or_kind_counts_as_no_override(lib, tmp_path):
@@ -1850,7 +1826,6 @@ def test_a_hand_typed_forward_slash_folder_reads_the_same(lib, tmp_path):
     lib.set_folders([{'path': str(tmp_path / 'm').replace(os.sep, '/') + '/'}])
     lib.scan()
     assert [i['title'] for i in lib.current()] == ['Heat']
-
 
 
 def test_a_year_sent_for_an_episode_keeps_the_film_year_it_had(lib, tmp_path):
@@ -1886,17 +1861,6 @@ def test_a_typed_title_the_new_numbers_match_goes_automatic(lib, tmp_path):
     assert not lib.by_id(ep['id'])['typed_title']
     lib.set_item(ep['id'], episode=4)                          # and a later renumber doesn't bring it back
     assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E04' and not lib.by_id(ep['id'])['typed_title']
-
-
-def test_a_film_titled_like_its_episode_form_is_itself_again_as_a_film(lib, tmp_path):
-    make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
-    lib.set_folders([{'path': str(tmp_path / 'm')}])
-    lib.scan()
-    m = lib.current()[0]
-    lib.set_item(m['id'], title='Home S01E01')
-    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)   # the typed title is now automatic
-    lib.set_item(m['id'], kind='movie')
-    assert lib.by_id(m['id'])['title'] == 'Home Movie'
 
 
 def test_enter_on_an_untitled_files_own_name_keeps_the_warning(lib, tmp_path):
@@ -1945,7 +1909,6 @@ def test_the_resolve_used_set_matches_the_kind(lib, tmp_path):
     assert s['kind'] == 'episode' and 'year' not in used
 
 
-
 def test_a_typed_title_survives_a_kind_round_trip(lib, tmp_path):
     make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -1991,7 +1954,6 @@ def test_a_padded_untitled_name_isnt_confirmed_by_typing_it(lib, tmp_path):
     assert lib.by_id(m['id'])['untitled']
 
 
-
 def test_a_left_over_title_is_cleaned_by_any_edit(lib, tmp_path):
     make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E03.mkv', b'three' * 100)
     lib.set_folders([{'path': str(tmp_path / 'm')}])
@@ -2011,3 +1973,47 @@ def test_an_untitled_padded_name_is_stored_stripped(lib, tmp_path):
     if not m['untitled']:
         pytest.skip('this name reads as a title here')
     assert m['title'] == '1080p'
+
+
+
+def test_an_untitled_file_typed_as_an_episode_keeps_its_warning_as_a_film_again(lib, tmp_path):
+    make(str(tmp_path / 'm'), '1080p.mkv', b'x' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)
+    lib.set_item(m['id'], title='1080p')                       # typed on the episode
+    lib.set_item(m['id'], kind='movie')                        # a film again: '1080p' is just its file name
+    it = lib.by_id(m['id'])
+    assert it['untitled'] and not it['typed_title']
+
+
+def test_a_films_old_stored_automatic_title_reads_automatic(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Heat 1995.mkv', b'h' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.data['items'][m['id']] = {'title': 'Heat'}             # old or hand-edited data, equal to automatic
+    lib._rebuild()
+    assert not lib.by_id(m['id'])['typed_title']
+
+
+def test_a_film_typed_like_an_episode_keeps_its_title_through_a_round_trip(lib, tmp_path):
+    make(str(tmp_path / 'm'), 'Home Movie 2003.mkv', b'h' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    m = lib.current()[0]
+    lib.set_item(m['id'], title='Home S01E01')                 # typed on the film
+    lib.set_item(m['id'], kind='episode', show='Home', season=1, episode=1)   # matches it as an episode
+    lib.set_item(m['id'], kind='movie')
+    assert lib.by_id(m['id'])['title'] == 'Home S01E01' and lib.by_id(m['id'])['typed_title']
+
+
+def test_a_padded_hand_edited_show_reads_stripped(lib, tmp_path):
+    make(str(tmp_path / 'm' / 'Ann Droid' / 'Season 1'), 'Ann Droid S01E02.mkv', b'two' * 100)
+    lib.set_folders([{'path': str(tmp_path / 'm')}])
+    lib.scan()
+    ep = next(i for i in lib.current() if i.get('show') == 'Ann Droid')
+    lib.data['items'][ep['id']] = {'show': ' Ann Droid '}
+    lib._rebuild()
+    assert lib.by_id(ep['id'])['title'] == 'Ann Droid S01E02'

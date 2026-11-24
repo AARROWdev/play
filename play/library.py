@@ -805,8 +805,9 @@ class Library:
             else:
                 ov[k] = v
         if cur is not None:
-            before, _before_auto, before_used = _resolve(cur['auto'], cur.get('auto_last'),
-                                                         self.data['items'].get(fp, {}))
+            stored = self.data['items'].get(fp, {})
+            if 'title' in stored and 'title_kind' not in stored and                     stored['title'] == _resolve(cur['auto'], cur.get('auto_last'), stored)[1]:
+                ov.pop('title', None)            # stored before titles recorded their kind, and automatic: a left-over
             s, auto_title, _used = _resolve(cur['auto'], cur.get('auto_last'), ov)
             # an episode has no film year: a year sent for one isn't kept (the film year it had stays)
             if 'year' in fields and s['kind'] != 'episode':
@@ -814,20 +815,22 @@ class Library:
                     ov.pop('year', None)
                 else:
                     ov['year'] = fields['year']
-            # the title this edit leaves automatic (an episode: from its numbers, as the edit leaves them). Typing
-            # exactly that goes back to automatic; anything else is kept as typed.
-            # A stored title that already read as automatic before the edit (left over) is dropped by any edit. A
-            # typed title is dropped only when an episode is renumbered (show, season or episode really change while
-            # it stays an episode) and the new numbers give exactly it, so a later renumber can't bring it back. A
-            # kind change keeps a typed title (it's yours), and so does a Kids or Hide toggle.
-            renumbered = before['kind'] == s['kind'] == 'episode' and                 any(before.get(k) != s.get(k) for k in ('show', 'season', 'episode'))
+            # Typed versus automatic is decided here, when a title is written, never guessed later. Typing the title
+            # this edit leaves automatic (an episode: from its numbers) goes back to automatic; anything else is
+            # stored with the kind it was typed for. A stored title that this edit makes automatic for that same
+            # kind (a film's name, or an episode renumbered to match) was the automatic one all along and is
+            # dropped, so a later renumber can't bring it back; for another kind (a film's typed name that matches
+            # it as an episode) it stays yours and reads as automatic only while it matches.
             if 'title' in fields:
                 if fields['title'] == auto_title:
                     ov.pop('title', None)
+                    ov.pop('title_kind', None)
                 else:
                     ov['title'] = fields['title']
-            elif 'title' in ov and ('title' not in before_used or (renumbered and ov['title'] == auto_title)):
+                    ov['title_kind'] = s['kind']
+            elif 'title' in ov and ov['title'] == auto_title and ov.get('title_kind', s['kind']) == s['kind']:
                 ov.pop('title', None)
+                ov.pop('title_kind', None)
         if ov:                    # may hold only the kids_folder_seen mark: kept so Kids isn't re-added
             self.data['items'][fp] = ov
         else:
@@ -1061,7 +1064,7 @@ def _resolve(auto, auto_last, ov):
     s = dict(auto)
     used = {k for k in OVERRIDABLE if k in ov and valid(k, ov[k])}   # (a bad hand-edited value counts as none)
     for k in used:
-        s[k] = ov[k]
+        s[k] = ov[k].strip() if isinstance(ov[k], str) else ov[k]
     renumbered = s.get('episode') != auto.get('episode')      # the file name's second number no longer applies
     s['episode_last'] = None if renumbered else auto_last
     if s['kind'] == 'episode' and not (s.get('show') and isinstance(s.get('season'), int)
@@ -1077,10 +1080,9 @@ def _resolve(auto, auto_last, ov):
         s['year'] = None                     # an episode has no film year (one made from a film drops it)
         used.discard('year')
         auto_title = _ep_title(s['show'], s['season'], s['episode'], s['episode_last'])
-    # the title follows the numbers (or the file name) unless one was typed; an episode's stored title that is
-    # exactly the one its numbers give reads as automatic (a film's typed name is kept as typed: it may be the
-    # name it had as an episode)
-    if 'title' in used and s['kind'] == 'episode' and ov['title'] == auto_title:
+    # the title follows the numbers (or the file name) unless one was typed: a stored title reads as typed while
+    # it differs from the automatic one
+    if 'title' in used and s['title'] == auto_title:
         used.discard('title')
     s['typed_title'] = 'title' in used
     if not s['typed_title']:
